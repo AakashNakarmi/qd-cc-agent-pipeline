@@ -18,7 +18,11 @@ class EnhancedExcelToTableProcessor:
         self.table_service = AzureTableService()
         self.openai_service = AzureOpenAIService()
         self.boq_schema = BOQSchema()
-        
+    
+    #######################################################    
+    ##### EXTRACTION OF PROJECT INFO FROM FIRST SHEET #####
+    ##### RELATED FUNCTIONS ###############################
+    #######################################################    
     
     def process_first_sheet_for_project_info(self, file_content: bytes, filename: str) -> Optional[Dict[str, Any]]:
         try:
@@ -122,9 +126,7 @@ class EnhancedExcelToTableProcessor:
     "project_description": "extracted or constructed project description", 
     "total_cost": null or numeric_value,
     "project_date": null or "YYYY-MM-DD",
-    "project_category": null or "category_string",
-    "confidence": "high|medium|low",
-    "extraction_notes": "Brief explanation of what was found and how it was interpreted"
+    "project_category": null or "category_string"
     }}
 
     Example response:
@@ -133,9 +135,7 @@ class EnhancedExcelToTableProcessor:
     "project_description": "Construction of 50-unit residential complex with amenities including parking, landscaping, and community facilities in Downtown Area",
     "total_cost": 2500000.0,
     "project_date": null,
-    "project_category": "Residential Construction",
-    "confidence": "high",
-    "extraction_notes": "Found clear project title in cell A1 and detailed description in cells A2-A4"
+    "project_category": "Residential Construction"
     }}
 
     If no meaningful project information can be found, use the filename and make reasonable assumptions:
@@ -144,9 +144,7 @@ class EnhancedExcelToTableProcessor:
     "project_description": "Construction project as per BOQ specifications",
     "total_cost": null,
     "project_date": null, 
-    "project_category": "Construction",
-    "confidence": "low",
-    "extraction_notes": "No clear project information found, used filename as fallback"
+    "project_category": "Construction"
     }}
     """
 
@@ -245,121 +243,47 @@ class EnhancedExcelToTableProcessor:
             Dict containing stored project information with project_id, or None if failed
         """
         try:
+            project_id = str(uuid.uuid4())
             # Extract project information from first sheet
             project_info = self.process_first_sheet_for_project_info(file_content, filename)
+            project_info['project_id'] = project_id
             
             if not project_info:
                 logging.error("Could not extract project information from first sheet")
                 return None
             
             # Store the project information
-            project_id = self.store_project_with_retry(project_info, filename)
+            project_result = self.store_project_with_retry(project_info, filename)
             
-            if project_id:
+            excel_result = self.process_excel_to_table(
+                file_content = file_content,
+                filename = filename,
+                project_id = project_id
+            )
+            
+            if project_result and excel_result.success:
                 # Return the complete project information including the assigned ID
-                stored_project_info = project_info.copy()
-                stored_project_info['project_id'] = project_id
-                stored_project_info['source_filename'] = filename
+                # stored_project_info = project_info.copy()
+                # stored_project_info['project_id'] = project_id
+                # stored_project_info['source_filename'] = filename
                 
-                logging.info(f"Successfully processed and stored project: {stored_project_info['project_name']}")
-                return stored_project_info
+                # logging.info(f"Successfully processed and stored project: {stored_project_info['project_name']}")
+                # return stored_project_info
+                return project_result, excel_result
             else:
                 logging.error("Failed to store project information")
-                return None
+                return None, None
                 
         except Exception as e:
             logging.error(f"Error in process_and_store_project_info: {str(e)}")
-            return None
-
-    # def process_excel_to_table(self, file_content: bytes, filename: str, max_records: int = 30) -> ProcessingResult:
-    #     """Process Excel file with multiple sheets and store records using OpenAI mapping"""
-    #     try:
-    #         # Read Excel file
-    #         excel_data = BytesIO(file_content)
-            
-    #         # Get all sheet names
-    #         excel_file = pd.ExcelFile(excel_data)
-    #         sheet_names = excel_file.sheet_names
-            
-    #         logging.info(f"Found {len(sheet_names)} sheets in {filename}: {sheet_names}")
-            
-    #         all_processed_records = []
-    #         sheet_results = []
-    #         total_records_processed = 0
-            
-    #         # Only process the first 2 sheets
-    #         for sheet_name in sheet_names[:2]:
-    #             try:
-    #                 # Process each sheet
-    #                 sheet_result = self._process_single_sheet(
-    #                     excel_file, sheet_name, filename, max_records
-    #                 )
-                    
-    #                 sheet_results.append({
-    #                     'sheet_name': sheet_name,
-    #                     'success': sheet_result['success'],
-    #                     'message': sheet_result['message'],
-    #                     'records_processed': sheet_result['records_processed']
-    #                 })
-                    
-    #                 if sheet_result['success'] and sheet_result.get('records'):
-    #                     all_processed_records.extend(sheet_result['records'])
-    #                     total_records_processed += sheet_result['records_processed']
-                    
-    #             except Exception as e:
-    #                 logging.error(f"Error processing sheet {sheet_name}: {str(e)}")
-    #                 sheet_results.append({
-    #                     'sheet_name': sheet_name,
-    #                     'success': False,
-    #                     'message': f"Error: {str(e)}",
-    #                     'records_processed': 0
-    #                 })
-            
-    #         # Store all valid records in Azure Table (BATCH PROCESSING)
-    #         if all_processed_records:
-    #             success = self._store_records_with_retry(all_processed_records, filename)
-                
-    #             if success:
-    #                 return ProcessingResult(
-    #                     success=True,
-    #                     message=f"Successfully processed {total_records_processed} records from {len(sheet_names)} sheets",
-    #                     records_processed=total_records_processed,
-    #                     data={"records": all_processed_records},
-    #                     sheet_results=sheet_results
-    #                 )
-    #             else:
-    #                 return ProcessingResult(
-    #                     success=False,
-    #                     message="Failed to store records in Azure Table",
-    #                     records_processed=0,
-    #                     sheet_results=sheet_results
-    #                 )
-    #         else:
-    #             return ProcessingResult(
-    #                 success=False,
-    #                 message="No valid BOQ data found in any sheet",
-    #                 records_processed=0,
-    #                 sheet_results=sheet_results
-    #             )
-    #         # return ProcessingResult(
-    #         #     success=True,
-    #         #     message=f"Successfully processed {total_records_processed} records from {len(sheet_names)} sheets",
-    #         #     records_processed=total_records_processed,
-    #         #     data={"records": all_processed_records},
-    #         #     sheet_results=sheet_results
-    #         # )
-            
-            
-                
-    #     except Exception as e:
-    #         logging.error(f"Error processing Excel file: {str(e)}")
-    #         return ProcessingResult(
-    #             success=False,
-    #             message=f"Error processing Excel file: {str(e)}",
-    #             records_processed=0
-    #         )
+            return None, None
     
-    def process_excel_to_table(self, file_content: bytes, filename: str, max_records: int = 30) -> ProcessingResult:
+    ############################################################
+    ##### EXTRACTION OF SECTION AND BOQ INFO FROM ALL SHEETS ###
+    ##### RELATED FUNCTIONS ####################################
+    ############################################################
+    
+    def process_excel_to_table(self, file_content: bytes, filename: str, project_id: str) -> ProcessingResult:
         """Process Excel file with multiple sheets and store records using OpenAI mapping"""
         try:
             # Read Excel file
@@ -375,13 +299,13 @@ class EnhancedExcelToTableProcessor:
             all_sections = []
             sheet_results = []
             total_records_processed = 0
-            project_id = filename.replace('.xlsx', '').replace('.xls', '')
+            # project_id = filename.replace('.xlsx', '').replace('.xls', '')
             
             for sheet_index, sheet_name in enumerate(sheet_names[:3]):
                 try:
                     # Process each sheet
                     sheet_result = self._process_single_sheet(
-                        excel_file, sheet_name, filename, max_records, sheet_index, project_id
+                        excel_file, sheet_name, filename, sheet_index, project_id
                     )
                     
                     sheet_results.append({
@@ -563,185 +487,8 @@ class EnhancedExcelToTableProcessor:
             logging.error(f"Error in _store_records_with_retry: {str(e)}")
             return False
     
-    # def _process_single_sheet(self, excel_file: pd.ExcelFile, sheet_name: str, filename: str, max_records: int) -> Dict[str, Any]:
-    #     """Process a single Excel sheet"""
-    #     try:
-    #         # Read the sheet without assuming header location
-    #         df_raw = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
-            
-    #         if df_raw.empty:
-    #             return {
-    #                 'success': False,
-    #                 'message': f"Sheet '{sheet_name}' is empty",
-    #                 'records_processed': 0
-    #             }
-            
-    #         # Convert first 20 rows to string representation for OpenAI analysis
-    #         preview_rows = min(20, len(df_raw))
-    #         sheet_preview = df_raw.head(preview_rows).to_string(index=True, na_rep='')
-            
-    #         logging.info(f"Sheet '{sheet_name}' preview (first {preview_rows} rows):\n{sheet_preview}")
-            
-    #         # Use OpenAI to analyze the entire sheet content and find the table structure
-    #         table_analysis = self._analyze_sheet_structure_with_openai(sheet_preview, sheet_name)
-            
-    #         if not table_analysis:
-    #             return {
-    #                 'success': False,
-    #                 'message': f"Could not analyze table structure for sheet '{sheet_name}'",
-    #                 'records_processed': 0
-    #             }
-            
-    #         # Extract the identified header row and column mapping
-    #         header_row = table_analysis.get('header_row')
-    #         column_mapping = table_analysis.get('column_mapping')
-            
-    #         if header_row is None or not column_mapping:
-    #             return {
-    #                 'success': False,
-    #                 'message': f"Could not identify table structure in sheet '{sheet_name}'",
-    #                 'records_processed': 0
-    #             }
-            
-    #         # Check if required fields (quantity and unit_rate) are present
-    #         required_mapped = self._validate_required_fields(column_mapping)
-    #         if not required_mapped:
-    #             return {
-    #                 'success': False,
-    #                 'message': f"Sheet '{sheet_name}' missing required fields (quantity and unit_rate)",
-    #                 'records_processed': 0
-    #             }
-            
-    #         # Re-read the sheet with the correct header row
-    #         df = pd.read_excel(excel_file, sheet_name=sheet_name, header=header_row)
-            
-    #         # Clean column names (remove any whitespace/special characters)
-    #         df.columns = df.columns.astype(str).str.strip()
-            
-    #         # Process records with the mapping
-    #         processed_records = self._map_and_clean_records(df, column_mapping, sheet_name, filename, max_records)
-            
-    #         return {
-    #             'success': True,
-    #             'message': f"Successfully processed sheet '{sheet_name}' (header at row {header_row})",
-    #             'records_processed': len(processed_records),
-    #             'records': processed_records,
-    #             'column_mapping': column_mapping,
-    #             'header_row': header_row
-    #         }
-            
-    #     except Exception as e:
-    #         logging.error(f"Error processing sheet {sheet_name}: {str(e)}")
-    #         return {
-    #             'success': False,
-    #             'message': f"Error processing sheet '{sheet_name}': {str(e)}",
-    #             'records_processed': 0
-    #         }
-    
-#     def _analyze_sheet_structure_with_openai(self, sheet_preview: str, sheet_name: str) -> Optional[Dict[str, Any]]:
-#         """Use OpenAI to analyze the entire sheet content and identify table structure"""
-#         try:
-#             # Prepare the schema information
-#             required_fields_info = json.dumps(self.boq_schema.REQUIRED_FIELDS, indent=2)
-#             optional_fields_info = json.dumps(self.boq_schema.OPTIONAL_FIELDS, indent=2)
-            
-#             system_message = """You are an expert in construction BOQ (Bill of Quantities) data analysis and Excel data extraction.
-# Your task is to analyze Excel sheet content and identify:
-# 1. Where the actual data table begins (header row number)
-# 2. Map column headers to a standardized BOQ schema
-# 3. Ensure quantity and unit_rate columns are identified (mandatory for BOQ processing)
-
-# Return only a valid JSON object with the analysis results."""
-            
-#             user_message = f"""
-# I have an Excel sheet named "{sheet_name}" with the following content (showing first 20 rows):
-
-# {sheet_preview}
-
-# Please analyze this sheet content and:
-
-# 1. IDENTIFY the row number where the actual data table headers are located (this might not be row 0)
-# 2. MAP the identified headers to the BOQ schema fields below
-
-# BOQ SCHEMA:
-
-# REQUIRED FIELDS (must be present):
-# {required_fields_info}
-
-# OPTIONAL FIELDS:
-# {optional_fields_info}
-
-# ANALYSIS RULES:
-# 1. Look for a row that contains column headers for a BOQ/costing table
-# 2. MUST identify 'quantity' and 'unit_rate' fields - these are mandatory
-# 3. The header row typically contains terms like: item, description, quantity, rate, amount, etc.
-# 4. Ignore rows with company names, titles, or other non-tabular content
-# 5. Map each identified header to the most appropriate schema field
-# 6. Use exact schema field names as values (e.g., 'quantity', 'unit_rate', 'description')
-
-# Return ONLY a JSON object in this exact format:
-# {{
-#   "header_row": <row_number>,
-#   "column_mapping": {{
-#     "original_header_1": "schema_field_1",
-#     "original_header_2": "schema_field_2"
-#   }},
-#   "confidence": "high|medium|low",
-#   "reasoning": "Brief explanation of why this row was identified as headers"
-# }}
-
-# Example response:
-# {{
-#   "header_row": 3,
-#   "column_mapping": {{
-#     "Item No": "item_number",
-#     "Description": "description", 
-#     "Qty": "quantity",
-#     "Rate": "unit_rate",
-#     "Amount": "total_cost"
-#   }},
-#   "confidence": "high",
-#   "reasoning": "Row 3 contains clear BOQ column headers with quantity and rate fields"
-# }}
-# """
-            
-#             response = self.openai_service.simple_chat(
-#                 user_message=user_message,
-#                 system_message=system_message,
-#                 temperature=0.1  # Low temperature for consistent analysis
-#             )
-            
-#             # Parse the JSON response
-#             try:
-#                 # Clean the response to extract JSON
-#                 response_clean = response.strip()
-#                 if response_clean.startswith('```json'):
-#                     response_clean = response_clean[7:-3]
-#                 elif response_clean.startswith('```'):
-#                     response_clean = response_clean[3:-3]
-                
-#                 table_analysis = json.loads(response_clean)
-                
-#                 logging.info(f"OpenAI table analysis for '{sheet_name}': {table_analysis}")
-                
-#                 # Validate the response structure
-#                 if 'header_row' in table_analysis and 'column_mapping' in table_analysis:
-#                     return table_analysis
-#                 else:
-#                     logging.error(f"Invalid response structure from OpenAI: {table_analysis}")
-#                     return None
-                
-#             except json.JSONDecodeError as je:
-#                 logging.error(f"Failed to parse OpenAI response as JSON: {response}")
-#                 logging.error(f"JSON Error: {str(je)}")
-#                 return None
-                
-#         except Exception as e:
-#             logging.error(f"Error analyzing sheet structure with OpenAI: {str(e)}")
-#             return None
-    
     def _process_single_sheet(self, excel_file: pd.ExcelFile, sheet_name: str, filename: str, 
-                            max_records: int, sheet_index: int, project_id: str) -> Dict[str, Any]:
+                            sheet_index: int, project_id: str) -> Dict[str, Any]:
         """Process a single Excel sheet for both BOQ items and section information"""
         try:
             # Read the sheet without assuming header location
@@ -797,7 +544,7 @@ class EnhancedExcelToTableProcessor:
                         df.columns = df.columns.astype(str).str.strip()
                         
                         # Process BOQ records with the mapping
-                        processed_records = self._map_and_clean_records(df, column_mapping, sheet_name, filename, max_records)
+                        processed_records = self._map_and_clean_records(df, column_mapping, sheet_name, filename)
                         
                         result_data['records'] = processed_records
                         result_data['records_processed'] = len(processed_records)
@@ -977,16 +724,16 @@ IMPORTANT:
         return has_required
     
     def _map_and_clean_records(self, df: pd.DataFrame, column_mapping: Dict[str, str], 
-                              sheet_name: str, filename: str, max_records: int) -> List[Dict[str, Any]]:
+                              sheet_name: str, filename: str) -> List[Dict[str, Any]]:
         """Map DataFrame columns to BOQ schema and clean the records"""
         # Get top N records
-        logging.warning("Mapping and cleaning records from DataFrame")
-        top_records = df.head(max_records)
+        # logging.warning("Mapping and cleaning records from DataFrame")
+        # top_records = df.head(max_records)
         
         # Create mapped records
         mapped_records = []
         
-        for index, row in top_records.iterrows():
+        for index, row in df.iterrows():
             # Start with base record structure
             mapped_record = {
                 'ItemID': str(uuid.uuid4()),  # Generate unique ID
@@ -995,11 +742,11 @@ IMPORTANT:
                 'SourceRow': index + 1
             }
             
-            logging.warning("Mapped record structure initialized: %s", mapped_record)
+            # logging.warning("Mapped record structure initialized: %s", mapped_record)
             
             # Map the columns according to the OpenAI mapping
             for original_header, schema_field in column_mapping.items():
-                logging.warning(f"Processing header '{original_header}' mapped to schema field '{schema_field}'")
+                # logging.warning(f"Processing header '{original_header}' mapped to schema field '{schema_field}'")
                 if original_header in df.columns:
                     value = row[original_header]
                     
@@ -1053,33 +800,23 @@ def process_excel_file(myblob):
         # Initialize services
         logging.warning(f"Using Azure Table Service with connection string: {os.environ['saqddev01_STORAGE']}")
         
-        # Process Excel with OpenAI assistance
         project_excel_processor = EnhancedExcelToTableProcessor()
-        excel_processor = EnhancedExcelToTableProcessor()
         
-        # Extract project information from the first sheet
-        project_info = project_excel_processor.process_first_sheet_for_project_info(file_content, myblob.name)
-        
-        project_result = project_excel_processor.process_and_store_project_info(
-            file_content=file_content,
-            filename=myblob.name
-        )
-        
-        result = excel_processor.process_excel_to_table(
+        project_result, excel_result = project_excel_processor.process_and_store_project_info(
             file_content=file_content,
             filename=myblob.name
         )
         
         # Log results
-        if result.success:
-            logging.info(f"Processing successful: {result.message}")
-            if result.sheet_results:
-                for sheet_result in result.sheet_results:
+        if project_result and excel_result.success:
+            logging.info(f"Processing successful: {excel_result.message}")
+            if excel_result.sheet_results:
+                for sheet_result in excel_result.sheet_results:
                     logging.info(f"Sheet '{sheet_result['sheet_name']}': {sheet_result['message']}")
         else:
-            logging.error(f"Processing failed: {result.message}")
+            logging.error(f"Processing failed: {excel_result.message}")
         
-        return result
+        return excel_result
         
     except Exception as e:
         logging.error(f"Error in process_excel_file: {str(e)}")

@@ -1,6 +1,7 @@
 # processors/excel_to_table_processor.py
 import json
 import os
+import time
 import uuid
 import pandas as pd
 import logging
@@ -8,14 +9,17 @@ import uuid
 from io import BytesIO
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from services.azure_sql_service import AzureSQLService
 from services.azure_table_service import AzureTableService
 from models.processing_models import BOQSchema, ProcessingResult, Section
 from services.openai_service import AzureOpenAIService
+from utils.boq_utils import merge_boq_descriptions_advanced
 
 
 class EnhancedExcelToTableProcessor:
     def __init__(self):
-        self.table_service = AzureTableService()
+        self.table_service = AzureSQLService()
+        # self.table_service = AzureTableService()
         self.openai_service = AzureOpenAIService()
         self.boq_schema = BOQSchema()
     
@@ -337,17 +341,18 @@ class EnhancedExcelToTableProcessor:
             # Store all valid records and sections in Azure Table (BATCH PROCESSING)
             storage_success = True
             
+            # Store section information
+            if all_sections:
+                section_success = self._store_sections_with_retry(all_sections, filename)
+                if not section_success:
+                    storage_success = False
+              
             # Store BOQ records
             if all_processed_records:
                 boq_success = self._store_records_with_retry(all_processed_records, filename)
                 if not boq_success:
                     storage_success = False
             
-            # Store section information
-            if all_sections:
-                section_success = self._store_sections_with_retry(all_sections, filename)
-                if not section_success:
-                    storage_success = False
             
             if storage_success and (all_processed_records or all_sections):
                 return ProcessingResult(
@@ -383,6 +388,66 @@ class EnhancedExcelToTableProcessor:
                 records_processed=0
             )
     
+    # def _store_sections_with_retry(self, sections: List[Section], filename: str, max_retries: int = 3) -> bool:
+    #     """Store section information with retry logic"""
+    #     try:
+    #         # Convert Section dataclass objects to dictionaries for storage
+    #         section_records = []
+    #         for section in sections:
+    #             section_dict = {
+    #                 'PartitionKey': f"{section.project_id}",
+    #                 'RowKey': f"{section.section_id}",
+    #                 'section_id': section.section_id,
+    #                 'section_name': section.section_name,
+    #                 'project_id': section.project_id,
+    #                 'cost': section.cost,
+    #                 'discipline': section.discipline,
+    #                 'source_file': filename
+    #             }
+    #             section_records.append(section_dict)
+            
+    #         # Try to store all sections at once (assuming you have a method for this)
+    #         # You might need to create a new method in AzureTableService for sections
+    #         success = self.table_service.insert_section_records(section_records)
+            
+    #         if success:
+    #             logging.info(f"Successfully stored all {len(sections)} sections in batch")
+    #             return True
+            
+    #         # If batch insert fails, try individual section insertion with retry
+    #         logging.warning("Batch section insert failed, trying individual section insertion")
+    #         successful_inserts = 0
+            
+    #         for i, section_record in enumerate(section_records):
+    #             retry_count = 0
+    #             record_inserted = False
+                
+    #             while retry_count < max_retries and not record_inserted:
+    #                 try:
+    #                     single_success = self.table_service.insert_section_records([section_record])
+    #                     if single_success:
+    #                         successful_inserts += 1
+    #                         record_inserted = True
+    #                         logging.debug(f"Successfully inserted section {i+1}/{len(section_records)}")
+    #                     else:
+    #                         retry_count += 1
+    #                         logging.warning(f"Failed to insert section {i+1}, retry {retry_count}/{max_retries}")
+                    
+    #                 except Exception as e:
+    #                     retry_count += 1
+    #                     logging.error(f"Error inserting section {i+1}, retry {retry_count}/{max_retries}: {str(e)}")
+                
+    #             if not record_inserted:
+    #                 logging.error(f"Failed to insert section {i+1} after {max_retries} retries: {section_record}")
+            
+    #         logging.info(f"Individual section insertion completed: {successful_inserts}/{len(section_records)} sections inserted")
+    #         return successful_inserts > 0
+            
+    #     except Exception as e:
+    #         logging.error(f"Error in _store_sections_with_retry: {str(e)}")
+    #         return False
+    
+    
     def _store_sections_with_retry(self, sections: List[Section], filename: str, max_retries: int = 3) -> bool:
         """Store section information with retry logic"""
         try:
@@ -390,8 +455,7 @@ class EnhancedExcelToTableProcessor:
             section_records = []
             for section in sections:
                 section_dict = {
-                    'PartitionKey': f"Project_{section.project_id}",
-                    'RowKey': f"Section_{section.section_id}",
+                    # Remove PartitionKey and RowKey from here - let insert_section_records handle them
                     'section_id': section.section_id,
                     'section_name': section.section_name,
                     'project_id': section.project_id,
@@ -401,8 +465,7 @@ class EnhancedExcelToTableProcessor:
                 }
                 section_records.append(section_dict)
             
-            # Try to store all sections at once (assuming you have a method for this)
-            # You might need to create a new method in AzureTableService for sections
+            # Try to store all sections at once
             success = self.table_service.insert_section_records(section_records)
             
             if success:
@@ -427,10 +490,17 @@ class EnhancedExcelToTableProcessor:
                         else:
                             retry_count += 1
                             logging.warning(f"Failed to insert section {i+1}, retry {retry_count}/{max_retries}")
+                            
+                            # Add exponential backoff
+                            time.sleep(2 ** retry_count)
                     
                     except Exception as e:
                         retry_count += 1
                         logging.error(f"Error inserting section {i+1}, retry {retry_count}/{max_retries}: {str(e)}")
+                        
+                        # Add exponential backoff
+                        if retry_count < max_retries:
+                            time.sleep(2 ** retry_count)
                 
                 if not record_inserted:
                     logging.error(f"Failed to insert section {i+1} after {max_retries} retries: {section_record}")
@@ -491,6 +561,7 @@ class EnhancedExcelToTableProcessor:
                             sheet_index: int, project_id: str) -> Dict[str, Any]:
         """Process a single Excel sheet for both BOQ items and section information"""
         try:
+            sheet_id = str(uuid.uuid4())
             # Read the sheet without assuming header location
             df_raw = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
             
@@ -508,7 +579,7 @@ class EnhancedExcelToTableProcessor:
             logging.info(f"Sheet '{sheet_name}' preview (first {preview_rows} rows):\n{sheet_preview}")
             
             # Use OpenAI to analyze the entire sheet content and find both table structure and section info
-            analysis_result = self._analyze_sheet_with_openai(sheet_preview, sheet_name, sheet_index, project_id)
+            analysis_result = self._analyze_sheet_with_openai(sheet_preview, sheet_name, sheet_index, project_id, sheet_id)
             
             if not analysis_result or not analysis_result.get('boq_table_found'):
                 return {
@@ -538,36 +609,62 @@ class EnhancedExcelToTableProcessor:
                     required_mapped = self._validate_required_fields(column_mapping)
                     if required_mapped:
                         # Re-read the sheet with the correct header row
-                        df = pd.read_excel(excel_file, sheet_name=sheet_name, header=header_row)
+                        # df = pd.read_excel(excel_file, sheet_name=sheet_name, header=header_row)
                         
-                        # Clean column names
-                        df.columns = df.columns.astype(str).str.strip()
+                        # # Clean column names
+                        # df.columns = df.columns.astype(str).str.strip()
                         
-                        # Process BOQ records with the mapping
-                        processed_records = self._map_and_clean_records(df, column_mapping, sheet_name, filename)
+                        # # Process BOQ records with the mapping
+                        # processed_records = self._map_and_clean_records(df, column_mapping, sheet_name, filename)
                         
-                        result_data['records'] = processed_records
-                        result_data['records_processed'] = len(processed_records)
-                        result_data['message'] += f" (BOQ: {len(processed_records)} records"
+                        # result_data['records'] = processed_records
+                        # result_data['records_processed'] = len(processed_records)
+                        # result_data['message'] += f" (BOQ: {len(processed_records)} records"
+                        
+                        column_indices = self._get_column_indices(df_raw, header_row, column_mapping)
+                    
+                        if column_indices:
+                            # Re-read the sheet with the correct header row
+                            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=header_row)
+                            
+                            # Filter out empty rows
+                            df = df.dropna(how='all')
+                            
+                            if not df.empty:
+                                # Process BOQ records using column indices
+                                preprocessed_records = self._extract_boq_records_by_indices(
+                                    df, column_indices, sheet_name, project_id, section_id=sheet_id
+                                )
+                                
+                                processed_records = merge_boq_descriptions_advanced(preprocessed_records)
+                                
+                                if processed_records:
+                                    result_data['success'] = True
+                                    result_data['records'] = processed_records
+                                    result_data['records_processed'] = len(processed_records)
+                                    result_data['message'] = f"Successfully processed {len(processed_records)} BOQ records from sheet '{sheet_name}'"
+                                    
+                                    logging.info(f"Successfully extracted {len(processed_records)} BOQ records from sheet '{sheet_name}'")
+                        
                 
                 # Process section information if found
-                if section_info:
-                    try:
-                        section = Section(
-                            section_id=section_info['section_id'],
-                            section_name=section_info['section_name'], 
-                            project_id=section_info['project_id'],
-                            cost=section_info.get('cost'),
-                            discipline=section_info.get('discipline')
-                        )
-                        result_data['section'] = section
-                        result_data['message'] += f", Section: {section.section_name})"
-                    except Exception as e:
-                        logging.error(f"Error creating Section object: {str(e)}")
-                        result_data['message'] += ", Section: error creating)"
-                else:
-                    result_data['message'] += ")"
-                
+                        if section_info:
+                            try:
+                                section = Section(
+                                    section_id=section_info['section_id'],
+                                    section_name=section_info['section_name'], 
+                                    project_id=section_info['project_id'],
+                                    cost=section_info.get('cost'),
+                                    discipline=section_info.get('discipline')
+                                )
+                                result_data['section'] = section
+                                result_data['message'] += f", Section: {section.section_name})"
+                            except Exception as e:
+                                logging.error(f"Error creating Section object: {str(e)}")
+                                result_data['message'] += ", Section: error creating)"
+                        else:
+                            result_data['message'] += ")"
+                    
                 return result_data
                 
         except Exception as e:
@@ -578,145 +675,437 @@ class EnhancedExcelToTableProcessor:
                 'records_processed': 0
             }
     
-    def _analyze_sheet_with_openai(self, sheet_preview: str, sheet_name: str, 
-                                  sheet_index: int, project_id: str) -> Optional[Dict[str, Any]]:
-        """Use OpenAI to analyze sheet for both BOQ table structure and section information"""
+#     def _analyze_sheet_with_openai(self, sheet_preview: str, sheet_name: str, 
+#           sheet_index, project_id: str) -> Optional[Dict[str, Any]]:
+#         """Use OpenAI to analyze sheet for both BOQ table structure and section information"""
+#         try:
+#             # Prepare the schema information
+#             required_fields_info = json.dumps(self.boq_schema.REQUIRED_FIELDS, indent=2)
+#             optional_fields_info = json.dumps(self.boq_schema.OPTIONAL_FIELDS, indent=2)
+            
+#             system_message = """You are an expert in construction BOQ (Bill of Quantities) data analysis and Excel data extraction.
+# Your task is to analyze Excel sheet content and identify:
+# 1. BOQ table structure (header row and column mapping)
+# 2. Section information (section name, costs, discipline)
+# 3. Extract metadata about the sheet/section
+
+# Return only a valid JSON object with the analysis results."""
+            
+#             user_message = f"""
+# I have an Excel sheet named "{sheet_name}" (sheet index: {sheet_index}) from project "{project_id}" with the following content:
+
+# {sheet_preview}
+
+# Please analyze this sheet content and provide BOTH:
+
+# 1. **BOQ TABLE ANALYSIS** (if a BOQ table exists):
+#    - Identify the row number where data table headers are located
+#    - Map headers to BOQ schema fields (quantity and unit_rate are mandatory)
+
+# 2. **SECTION INFORMATION EXTRACTION**:
+#    - Extract section name (often the sheet name or a title in the sheet)
+#    - Identify any total costs or budget amounts
+#    - Determine the discipline/trade (electrical, mechanical, civil, etc.)
+#    - Generate a section_id (use sheet_index or derive from content)
+
+# BOQ SCHEMA:
+# REQUIRED FIELDS: {required_fields_info}
+# OPTIONAL FIELDS: {optional_fields_info}
+
+# SECTION SCHEMA:
+# - section_id: int (required) - use sheet index or generate from content
+# - section_name: str (required) - extract from sheet name or content
+# - project_id: str (required) - use "{project_id}"
+# - cost: float (optional) - any total/budget amount found
+# - discipline: str (optional) - construction discipline/trade
+
+# Return ONLY a JSON object in this format:
+# {{
+#   "boq_table_found":"true|false",
+#   "table_analysis": {{
+#     "header_row": <row_number_or_null>,
+#     "column_mapping": {{}},
+#     "confidence": "high|medium|low|none"
+#   }},
+#   "section_info": {{
+#     "section_id": {sheet_index},
+#     "section_name": "<extracted_section_name>",
+#     "project_id": "{project_id}",
+#     "cost": <total_cost_or_null>,
+#     "discipline": "<discipline_or_null>"
+#   }}
+# }}
+
+# IMPORTANT:
+# - If no BOQ table is found, set boq_table_found as false. table_analysis values and section_info values to null/empty
+# - Use sheet name as fallback for section_name
+# - Look for keywords like "total", "sum", "budget" for cost extraction
+# - Look for discipline keywords like "electrical", "mechanical", "civil", "plumbing", etc.
+# """
+            
+#             response = self.openai_service.simple_chat(
+#                 user_message=user_message,
+#                 system_message=system_message,
+#                 temperature=0.1
+#             )
+            
+#             # Parse the JSON response
+#             try:
+#                 response_clean = response.strip()
+#                 if response_clean.startswith('```json'):
+#                     response_clean = response_clean[7:-3]
+#                 elif response_clean.startswith('```'):
+#                     response_clean = response_clean[3:-3]
+                
+#                 analysis_result = json.loads(response_clean)
+                
+#                 logging.info(f"OpenAI analysis for '{sheet_name}': {analysis_result}")
+                
+#                 # Validate and clean the response
+#                 # if 'section_info' not in analysis_result:
+#                 #     # Create default section info if missing
+#                 #     analysis_result['section_info'] = {
+#                 #         'section_id': sheet_index,
+#                 #         'section_name': sheet_name,
+#                 #         'project_id': project_id,
+#                 #         'cost': None,
+#                 #         'discipline': None
+#                 #     }
+                
+#                 # Ensure section_info has required fields
+#                 # section_info = analysis_result['section_info']
+#                 # if 'section_id' not in section_info:
+#                 #     section_info['section_id'] = sheet_index
+#                 # if 'section_name' not in section_info or not section_info['section_name']:
+#                 #     section_info['section_name'] = sheet_name
+#                 # if 'project_id' not in section_info:
+#                 #     section_info['project_id'] = project_id
+                
+#                 return analysis_result
+                
+#             except json.JSONDecodeError as je:
+#                 logging.error(f"Failed to parse OpenAI response as JSON: {response}")
+#                 logging.error(f"JSON Error: {str(je)}")
+#                 # Return default structure with section info
+#                 return {
+#                     'table_analysis': None,
+#                     'section_info': {
+#                         'section_id': sheet_index,
+#                         'section_name': sheet_name,
+#                         'project_id': project_id,
+#                         'cost': None,
+#                         'discipline': None
+#                     }
+#                 }
+                
+#         except Exception as e:
+#             logging.error(f"Error analyzing sheet with OpenAI: {str(e)}")
+#             return {
+#                 'table_analysis': None,
+#                 'section_info': {
+#                     'section_id': sheet_index,
+#                     'section_name': sheet_name,
+#                     'project_id': project_id,
+#                     'cost': None,
+#                     'discipline': None
+#                 }
+#             }
+    
+    def _get_column_indices(self, df_raw: pd.DataFrame, header_row: int, 
+                       column_mapping: Dict[str, str]) -> Dict[str, int]:
+        """Get column indices for all mapped columns"""
         try:
-            # Prepare the schema information
-            required_fields_info = json.dumps(self.boq_schema.REQUIRED_FIELDS, indent=2)
-            optional_fields_info = json.dumps(self.boq_schema.OPTIONAL_FIELDS, indent=2)
+            # Get the header row data
+            if header_row >= len(df_raw):
+                logging.error(f"Header row {header_row} is beyond sheet length {len(df_raw)}")
+                return {}
             
-            system_message = """You are an expert in construction BOQ (Bill of Quantities) data analysis and Excel data extraction.
-Your task is to analyze Excel sheet content and identify:
-1. BOQ table structure (header row and column mapping)
-2. Section information (section name, costs, discipline)
-3. Extract metadata about the sheet/section
-
-Return only a valid JSON object with the analysis results."""
+            header_data = df_raw.iloc[header_row]
+            column_indices = {}
             
-            user_message = f"""
-I have an Excel sheet named "{sheet_name}" (sheet index: {sheet_index}) from project "{project_id}" with the following content:
-
-{sheet_preview}
-
-Please analyze this sheet content and provide BOTH:
-
-1. **BOQ TABLE ANALYSIS** (if a BOQ table exists):
-   - Identify the row number where data table headers are located
-   - Map headers to BOQ schema fields (quantity and unit_rate are mandatory)
-
-2. **SECTION INFORMATION EXTRACTION**:
-   - Extract section name (often the sheet name or a title in the sheet)
-   - Identify any total costs or budget amounts
-   - Determine the discipline/trade (electrical, mechanical, civil, etc.)
-   - Generate a section_id (use sheet_index or derive from content)
-
-BOQ SCHEMA:
-REQUIRED FIELDS: {required_fields_info}
-OPTIONAL FIELDS: {optional_fields_info}
-
-SECTION SCHEMA:
-- section_id: int (required) - use sheet index or generate from content
-- section_name: str (required) - extract from sheet name or content
-- project_id: str (required) - use "{project_id}"
-- cost: float (optional) - any total/budget amount found
-- discipline: str (optional) - construction discipline/trade
-
-Return ONLY a JSON object in this format:
-{{
-  "boq_table_found":"true|false",
-  "table_analysis": {{
-    "header_row": <row_number_or_null>,
-    "column_mapping": {{}},
-    "confidence": "high|medium|low|none"
-  }},
-  "section_info": {{
-    "section_id": {sheet_index},
-    "section_name": "<extracted_section_name>",
-    "project_id": "{project_id}",
-    "cost": <total_cost_or_null>,
-    "discipline": "<discipline_or_null>"
-  }}
-}}
-
-IMPORTANT:
-- If no BOQ table is found, set boq_table_found as false. table_analysis values and section_info values to null/empty
-- Use sheet name as fallback for section_name
-- Look for keywords like "total", "sum", "budget" for cost extraction
-- Look for discipline keywords like "electrical", "mechanical", "civil", "plumbing", etc.
-"""
+            logging.info(f"Header row {header_row} data: {header_data.tolist()}")
             
-            response = self.openai_service.simple_chat(
-                user_message=user_message,
-                system_message=system_message,
-                temperature=0.1
-            )
+            # For each mapped column, find its index
+            for actual_column_name, schema_field in column_mapping.items():
+                found_index = None
+                
+                # Try exact match first
+                for col_idx, header_value in enumerate(header_data):
+                    if pd.isna(header_value):
+                        continue
+                        
+                    header_str = str(header_value).strip()
+                    if header_str == actual_column_name:
+                        found_index = col_idx
+                        break
+                
+                # If exact match not found, try fuzzy matching
+                if found_index is None:
+                    for col_idx, header_value in enumerate(header_data):
+                        if pd.isna(header_value):
+                            continue
+                            
+                        header_str = str(header_value).strip().lower()
+                        actual_lower = actual_column_name.strip().lower()
+                        
+                        # Check if they're similar (removing spaces, punctuation)
+                        header_clean = ''.join(c for c in header_str if c.isalnum())
+                        actual_clean = ''.join(c for c in actual_lower if c.isalnum())
+                        
+                        if header_clean == actual_clean:
+                            found_index = col_idx
+                            break
+                
+                if found_index is not None:
+                    column_indices[schema_field] = found_index
+                    logging.info(f"Mapped '{actual_column_name}' -> '{schema_field}' at column index {found_index}")
+                else:
+                    logging.warning(f"Could not find column '{actual_column_name}' in header row")
             
-            # Parse the JSON response
+            logging.info(f"Final column indices mapping: {column_indices}")
+            return column_indices
+            
+        except Exception as e:
+            logging.error(f"Error getting column indices: {str(e)}")
+            return {}
+
+    def _extract_boq_records_by_indices(self, df: pd.DataFrame, column_indices: Dict[str, int], 
+                                    sheet_name: str, project_id: str, section_id: str) -> List[Dict[str, Any]]:
+        """Extract BOQ records using column indices for better performance"""
+        try:
+            boq_records = []
+            
+            # Get required field indices
+            quantity_idx = column_indices.get('Quantity')
+            unit_rate_idx = column_indices.get('UnitRate')
+            boq_description_idx = column_indices.get('Description')
+            
+            if quantity_idx is None or unit_rate_idx is None:
+                logging.error("Required field indices not found")
+                return []
+            
+            logging.info(f"Using column indices: {column_indices}")
+            
+            # Convert DataFrame to numpy array for faster access
+            data_array = df.values
+            
+            for row_idx, row_data in enumerate(data_array):
+                try:
+                    # Check if we have enough columns
+                    if len(row_data) <= max(quantity_idx, unit_rate_idx):
+                        continue
+                    
+                    # Get required values using indices
+                    quantity_value = row_data[quantity_idx] if quantity_idx < len(row_data) else None
+                    unit_rate_value = row_data[unit_rate_idx] if unit_rate_idx < len(row_data) else None
+                    description_value = row_data[boq_description_idx] if boq_description_idx < len(row_data) else None
+                    
+                    # Skip if required values are missing or invalid
+                    # if pd.isna(quantity_value) or pd.isna(unit_rate_value):
+                    #     continue
+                    if pd.isna(description_value):
+                        continue
+                    
+                    # Try to convert to numeric values
+                    # try:
+                    #     quantity = float(str(quantity_value).replace(',', ''))
+                    #     unit_rate = float(str(unit_rate_value).replace(',', ''))
+                    # except (ValueError, TypeError):
+                    #     logging.warning(f"Invalid numeric values in row {row_idx + 1}: quantity={quantity_value}, unit_rate={unit_rate_value}")
+                    #     continue
+                    
+                    # Skip zero or negative values
+                    # if quantity <= 0 or unit_rate <= 0:
+                    #     continue
+                    
+                    # Create BOQ record
+                    boq_record = {
+                        'ItemID': str(uuid.uuid4()),
+                        'ProjectID': project_id,
+                        'SectionID': section_id,  # Use sheet name as section ID
+                        'SheetName': sheet_name,
+                        'SourceRow': row_idx + 1,
+                        'Quantity': quantity_value,
+                        'UnitRate': unit_rate_value,
+                        # 'TotalCost': quantity_value  # Calculate total
+                    }
+                    
+                    # Add ALL other mapped fields using indices
+                    for schema_field, col_idx in column_indices.items():
+                        if schema_field not in ['Quantity', 'UnitRate'] and col_idx < len(row_data):
+                            value = row_data[col_idx]
+                            
+                            if not pd.isna(value) and str(value).strip():
+                                if schema_field == 'TotalCost':
+                                    # Try to convert to float for cost fields
+                                    try:
+                                        boq_record[schema_field] = float(str(value).replace(',', ''))
+                                    except (ValueError, TypeError):
+                                        boq_record[schema_field] = str(value).strip()
+                                else:
+                                    boq_record[schema_field] = str(value).strip()
+                    
+                    boq_records.append(boq_record)
+                    
+                except Exception as row_error:
+                    logging.error(f"Error processing row {row_idx + 1} in sheet '{sheet_name}': {str(row_error)}")
+                    continue
+            
+            logging.info(f"Successfully extracted {len(boq_records)} valid BOQ records from sheet '{sheet_name}'")
+            return boq_records
+            
+        except Exception as e:
+            logging.error(f"Error extracting BOQ records from sheet '{sheet_name}': {str(e)}")
+            return []
+
+    
+    def _analyze_sheet_with_openai(self, sheet_preview: str, sheet_name: str, 
+                              sheet_index: int, project_id: str, sheet_id: str ) -> Optional[Dict[str, Any]]:
+            """Use OpenAI to analyze sheet for both BOQ table structure and section information"""
             try:
-                response_clean = response.strip()
-                if response_clean.startswith('```json'):
-                    response_clean = response_clean[7:-3]
-                elif response_clean.startswith('```'):
-                    response_clean = response_clean[3:-3]
+                # Prepare the schema information
+                required_fields_info = json.dumps(self.boq_schema.REQUIRED_FIELDS, indent=2)
+                optional_fields_info = json.dumps(self.boq_schema.OPTIONAL_FIELDS, indent=2)
                 
-                analysis_result = json.loads(response_clean)
+                system_message = """You are an expert in construction BOQ (Bill of Quantities) data analysis and Excel data extraction.
+        Your task is to analyze Excel sheet content and identify:
+        1. BOQ table structure (header row and column mapping)
+        2. Section information (section name, costs, discipline)
+        3. Extract metadata about the sheet/section
+
+        Return only a valid JSON object with the analysis results."""
                 
-                logging.info(f"OpenAI analysis for '{sheet_name}': {analysis_result}")
+                user_message = f"""
+        I have an Excel sheet named "{sheet_name}" (sheet index: {sheet_index}) from project "{project_id}" with the following content:
+
+        {sheet_preview}
+
+        Please analyze this sheet content and provide BOTH:
+
+        1. **BOQ TABLE ANALYSIS** (if a BOQ table exists):
+        - Identify the exact row number (0-based index) where the table headers are located
+        - Map the column headers to BOQ schema fields
+        - Focus on finding Quantity and UnitRate columns (these are mandatory)
+
+        2. **SECTION INFORMATION EXTRACTION**:
+        - Extract section name (often the sheet name or a title in the sheet)
+        - Identify any total costs or budget amounts
+        - Determine the discipline/trade (electrical, mechanical, civil, etc.)
+        - Use sheet_index as section_id
+
+        BOQ SCHEMA:
+        REQUIRED FIELDS: {required_fields_info}
+        OPTIONAL FIELDS: {optional_fields_info}
+
+        SECTION SCHEMA:
+        - section_id: str (required) - use {sheet_id}
+        - section_name: str (required) - extract from sheet name or content
+        - project_id: str (required) - use "{project_id}"
+        - cost: float (optional) - any total/budget amount found
+        - discipline: str (optional) - construction discipline/trade
+
+        Return ONLY a JSON object in this exact format:
+        {{
+        "boq_table_found": true|false,
+        "table_analysis": {{
+            "header_row": <row_number_or_null>,
+            "column_mapping": {{
+            "<actual_column_name>": "<schema_field_name>",
+            ...
+            }},
+            "confidence": "high|medium|low"
+        }},
+        "section_info": {{
+            "section_id": {sheet_id},
+            "section_name": "<extracted_section_name>",
+            "project_id": "{project_id}",
+            "cost": <total_cost_or_null>,
+            "discipline": "<discipline_or_null>"
+        }}
+        }}
+
+        CRITICAL REQUIREMENTS:
+        - header_row must be the exact 0-based row index where column headers are located
+        - column_mapping keys must be the EXACT column names from the Excel sheet
+        - column_mapping values must be from the BOQ schema field names
+        - If no BOQ table is found, set boq_table_found to false and table_analysis to null
+        - Always provide section_info using sheet name as fallback for section_name
+        - Look for cost-related keywords: "total", "sum", "budget", "amount", "cost"
+        - Look for discipline keywords: "electrical", "mechanical", "civil", "plumbing", "hvac", etc.
+        """
                 
-                # Validate and clean the response
-                # if 'section_info' not in analysis_result:
-                #     # Create default section info if missing
-                #     analysis_result['section_info'] = {
-                #         'section_id': sheet_index,
-                #         'section_name': sheet_name,
-                #         'project_id': project_id,
-                #         'cost': None,
-                #         'discipline': None
-                #     }
+                response = self.openai_service.simple_chat(
+                    user_message=user_message,
+                    system_message=system_message,
+                    temperature=0.1
+                )
                 
-                # Ensure section_info has required fields
-                # section_info = analysis_result['section_info']
-                # if 'section_id' not in section_info:
-                #     section_info['section_id'] = sheet_index
-                # if 'section_name' not in section_info or not section_info['section_name']:
-                #     section_info['section_name'] = sheet_name
-                # if 'project_id' not in section_info:
-                #     section_info['project_id'] = project_id
-                
-                return analysis_result
-                
-            except json.JSONDecodeError as je:
-                logging.error(f"Failed to parse OpenAI response as JSON: {response}")
-                logging.error(f"JSON Error: {str(je)}")
-                # Return default structure with section info
+                # Parse the JSON response
+                try:
+                    response_clean = response.strip()
+                    if response_clean.startswith('```json'):
+                        response_clean = response_clean[7:-3]
+                    elif response_clean.startswith('```'):
+                        response_clean = response_clean[3:-3]
+                    
+                    analysis_result = json.loads(response_clean)
+                    
+                    # Validate the response structure
+                    if 'boq_table_found' not in analysis_result:
+                        analysis_result['boq_table_found'] = False
+                    
+                    if 'section_info' not in analysis_result:
+                        analysis_result['section_info'] = {
+                            'section_id': sheet_id,
+                            'section_name': sheet_name,
+                            'project_id': project_id,
+                            'cost': None,
+                            'discipline': None
+                        }
+                    
+                    # Ensure section_info has required fields
+                    section_info = analysis_result['section_info']
+                    section_info.setdefault('section_id', sheet_id)
+                    section_info.setdefault('section_name', sheet_name)
+                    section_info.setdefault('project_id', project_id)
+                    
+                    logging.info(f"OpenAI analysis for '{sheet_name}': {analysis_result}")
+                    return analysis_result
+                    
+                except json.JSONDecodeError as je:
+                    logging.error(f"Failed to parse OpenAI response as JSON: {response}")
+                    logging.error(f"JSON Error: {str(je)}")
+                    # Return default structure with section info
+                    return {
+                        'boq_table_found': False,
+                        'table_analysis': None,
+                        'section_info': {
+                            'section_id': sheet_id,
+                            'section_name': sheet_name,
+                            'project_id': project_id,
+                            'cost': None,
+                            'discipline': None
+                        }
+                    }
+                    
+            except Exception as e:
+                logging.error(f"Error analyzing sheet with OpenAI: {str(e)}")
                 return {
+                    'boq_table_found': False,
                     'table_analysis': None,
                     'section_info': {
-                        'section_id': sheet_index,
+                        'section_id': sheet_id,
                         'section_name': sheet_name,
                         'project_id': project_id,
                         'cost': None,
                         'discipline': None
                     }
                 }
-                
-        except Exception as e:
-            logging.error(f"Error analyzing sheet with OpenAI: {str(e)}")
-            return {
-                'table_analysis': None,
-                'section_info': {
-                    'section_id': sheet_index,
-                    'section_name': sheet_name,
-                    'project_id': project_id,
-                    'cost': None,
-                    'discipline': None
-                }
-            }
+    
     
     def _validate_required_fields(self, column_mapping: Dict[str, str]) -> bool:
         """Validate that required fields are present in the mapping"""
-        mapped_fields = set(column_mapping.keys())
+        mapped_fields = set(column_mapping.values())
         required_fields = {'Quantity', 'UnitRate'}
         
         has_required = required_fields.issubset(mapped_fields)
@@ -753,78 +1142,15 @@ IMPORTANT:
                     # Clean up the value
                     if pd.isna(value):
                         mapped_record[schema_field] = None
-                    # elif schema_field in ['quantity', 'unit_rate', 'total_cost']:
-                    #     # Handle numeric fields
-                    #     try:
-                    #         # Convert to float, handling string representations
-                    #         if isinstance(value, str):
-                    #             # Remove commas and other formatting
-                    #             clean_value = value.replace(',', '').replace('$', '').strip()
-                    #             mapped_record[schema_field] = float(clean_value) if clean_value else 0.0
-                    #         else:
-                    #             mapped_record[schema_field] = float(value) if value is not None else 0.0
-                    #     except (ValueError, TypeError):
-                    #         logging.warning(f"Could not convert '{value}' to float for field '{schema_field}', using 0.0")
-                    #         mapped_record[schema_field] = 0.0
+
                     else:
                         # Handle text fields
                         mapped_record[schema_field] = str(value).strip() if value is not None else ""
                         
             mapped_records.append(mapped_record)
-            
-            # Calculate total_cost if not provided but quantity and unit_rate are available
-            # if ('total_cost' not in mapped_record and 
-            #     'quantity' in mapped_record and 'unit_rate' in mapped_record and
-            #     mapped_record.get('quantity', 0) > 0 and mapped_record.get('unit_rate', 0) > 0):
-            #     mapped_record['total_cost'] = float(mapped_record['quantity']) * float(mapped_record['unit_rate'])
-            
-            # # Only include records that have both quantity and unit_rate with valid values
-            # if (mapped_record.get('quantity', 0) > 0 and mapped_record.get('unit_rate', 0) > 0):
-            #     mapped_records.append(mapped_record)
-            # else:
-            #     logging.debug(f"Skipping record {index + 1} - missing required quantity/unit_rate: "
-            #                 f"qty={mapped_record.get('quantity')}, rate={mapped_record.get('unit_rate')}")
         
         logging.info(f"Mapped {len(mapped_records)} valid records from sheet '{sheet_name}'")
         return mapped_records
-
-# Usage in your Azure Function
-def process_excel_file(myblob):
-    """
-    Enhanced process function for multiple sheets with OpenAI mapping
-    """
-    try:
-        # Read blob content
-        file_content = myblob.read()
-        
-        # Initialize services
-        logging.warning(f"Using Azure Table Service with connection string: {os.environ['saqddev01_STORAGE']}")
-        
-        project_excel_processor = EnhancedExcelToTableProcessor()
-        
-        project_result, excel_result = project_excel_processor.process_and_store_project_info(
-            file_content=file_content,
-            filename=myblob.name
-        )
-        
-        # Log results
-        if project_result and excel_result.success:
-            logging.info(f"Processing successful: {excel_result.message}")
-            if excel_result.sheet_results:
-                for sheet_result in excel_result.sheet_results:
-                    logging.info(f"Sheet '{sheet_result['sheet_name']}': {sheet_result['message']}")
-        else:
-            logging.error(f"Processing failed: {excel_result.message}")
-        
-        return excel_result
-        
-    except Exception as e:
-        logging.error(f"Error in process_excel_file: {str(e)}")
-        return ProcessingResult(
-            success=False,
-            message=f"Error processing blob: {str(e)}",
-            records_processed=0
-        )
 
 
 

@@ -9,6 +9,8 @@ from azure.data.tables import TableEntity
 
 import re
 
+from utils.boq_utils import is_valid_total_cost, sanitize_key
+
 class AzureTableService:
     def __init__(self):
         self.connection_string = os.environ["saqddev01_STORAGE"]
@@ -51,8 +53,8 @@ class AzureTableService:
         """
         try:            
             # Create a unique project ID if not provided
-            project_id = str(uuid.uuid4())
-            # project_id = project_data.get('project_id') or str(uuid.uuid4())
+            # project_id = str(uuid.uuid4())
+            project_id = project_data.get('project_id')
             
             # Prepare the entity for Azure Table
             # PartitionKey: Use a consistent partition strategy (e.g., by year or category)
@@ -99,6 +101,64 @@ class AzureTableService:
             logging.error(f"Error inserting project record: {str(e)}")
             return False
     
+    # def insert_section_records(self, section_records: List[Dict[str, Any]]) -> bool:
+    #     """
+    #     Insert section records into Azure Table Storage
+        
+    #     Args:
+    #         section_records: List of dictionaries containing section information
+        
+    #     Returns:
+    #         bool: True if successful, False otherwise
+    #     """
+    #     try:
+    #         if not section_records:
+    #             logging.warning("No section records to insert")
+    #             return True
+            
+    #         successful_inserts = 0
+            
+    #         for record in section_records:
+    #             try:
+    #                 # Create table entity
+    #                 entity = TableEntity()
+                    
+    #                 # Set partition and row keys
+    #                 project_id = record.get('project_id', 'Unknown')
+    #                 section_id = record.get('section_id', 0)
+    #                 discipline = record.get('discipline', 'General')
+                    
+    #                 entity['PartitionKey'] = discipline
+    #                 entity['RowKey'] = section_id
+                    
+    #                 # Set section data
+    #                 entity['SectionID'] = section_id
+    #                 entity['SectionName'] = record.get('section_name', '')
+    #                 entity['ProjectID'] = project_id
+    #                 entity['Cost'] = record.get('cost')
+    #                 entity['Discipline'] = record.get('discipline', '')
+    #                 entity['SourceFile'] = record.get('source_file', '')
+    #                 entity['CreatedDate'] = datetime.utcnow()
+    #                 entity['LastModified'] = datetime.utcnow()
+                    
+    #                 # Insert into table
+    #                 self.section_table_client.create_entity(entity=entity)
+    #                 successful_inserts += 1
+    #                 logging.debug(f"Successfully inserted section: {record.get('section_name', 'Unknown')}")
+                    
+    #             except Exception as e:
+    #                 logging.error(f"Error inserting section record: {str(e)}")
+    #                 logging.error(f"Section record data: {record}")
+    #                 continue
+            
+    #         logging.info(f"Successfully inserted {successful_inserts}/{len(section_records)} section records")
+    #         return successful_inserts > 0
+            
+    #     except Exception as e:
+    #         logging.error(f"Error in insert_section_records: {str(e)}")
+    #         return False
+    
+    
     def insert_section_records(self, section_records: List[Dict[str, Any]]) -> bool:
         """
         Insert section records into Azure Table Storage
@@ -121,18 +181,23 @@ class AzureTableService:
                     # Create table entity
                     entity = TableEntity()
                     
-                    # Set partition and row keys
+                    # Set partition and row keys (ensure RowKey is string)
                     project_id = record.get('project_id', 'Unknown')
                     section_id = record.get('section_id', 0)
+                    discipline = record.get('discipline', 'General')
                     
-                    entity['PartitionKey'] = f"123"
-                    entity['RowKey'] = f"Section_{section_id}"
+                    entity['PartitionKey'] = discipline  # Use discipline as partition key
+                    entity['RowKey'] = str(section_id)   # Convert to string
                     
-                    # Set section data
+                    # Set section data (handle None values)
                     entity['SectionID'] = section_id
                     entity['SectionName'] = record.get('section_name', '')
                     entity['ProjectID'] = project_id
-                    entity['Cost'] = record.get('cost')
+                    
+                    # Handle None cost value
+                    cost = record.get('cost')
+                    entity['Cost'] = cost if cost is not None else 0
+                    
                     entity['Discipline'] = record.get('discipline', '')
                     entity['SourceFile'] = record.get('source_file', '')
                     entity['CreatedDate'] = datetime.utcnow()
@@ -154,57 +219,73 @@ class AzureTableService:
         except Exception as e:
             logging.error(f"Error in insert_section_records: {str(e)}")
             return False
- 
+    
     def insert_boq_records(self, records: List[Dict[str, Any]], project_id: str) -> bool:
         """Insert BOQ records into Azure Table with specific schema"""
         try:
             entities = []
             timestamp = datetime.utcnow().isoformat()
+            skipped_no_total_cost = 0
+            skipped_missing_fields = 0
             
             for record in records:
                 # Validate required fields
                 if not record.get('ItemID') or not record.get('ProjectID'):
                     logging.warning(f"Skipping record with missing ItemID or ProjectID: {record}")
+                    skipped_missing_fields += 1
                     continue
+                
+                # Validate total_cost - skip records without valid total_cost
+                total_cost = record.get('TotalCost')
+                if not is_valid_total_cost(total_cost):
+                    logging.debug(f"Skipping record with invalid TotalCost: ItemID={record.get('ItemID')}, TotalCost={total_cost} (type: {type(total_cost)})")
+                    skipped_no_total_cost += 1
+                    continue
+            
+            # Convert total_cost to float if it's a valid string
+                if isinstance(total_cost, str):
+                    total_cost = float(total_cost.strip())
                 
                 # Create entity with the exact BOQ schema
                 entity = {
                     # Azure Table required fields
-                    "PartitionKey": self._sanitize_key(record['ProjectID']),  # Use ProjectID as partition
+                    "PartitionKey": sanitize_key(record['ProjectID']),  # Use ProjectID as partition
                     "RowKey": record['ItemID'],  # Use ItemID as unique row key
                     
                     # BOQ specific fields - maintaining exact schema
                     "ItemID": record['ItemID'],
                     "ProjectID": record['ProjectID'],
+                    "SectionID": record['SectionID'],
                     "SheetName": record.get('SheetName', ''),
                     "SourceRow": record.get('SourceRow', 0),
-                    "remarks": record.get('remarks') or '',  # Convert None to empty string
-                    "item_number": record.get('item_number') or '',
-                    "description": record.get('description') or '',
-                    "quantity": record.get('quantity'),  # Keep None as is for numeric fields
-                    "unit": record.get('unit') or '',
-                    "unit_rate": record.get('unit_rate'),  # Keep None as is for numeric fields  
-                    "total_cost": record.get('total_cost'),  # Keep None as is for numeric fields
+                    # "remarks": record.get('remarks') or '',  # Convert None to empty string
+                    "ItemNumber": record.get('ItemNumber') or '',
+                    "Description": record.get('Description') or '',
+                    "Quantity": record.get('Quantity'),  # Keep None as is for numeric fields
+                    "Unit": record.get('Unit') or '',
+                    "UnitRate": record.get('UnitRate'),  # Keep None as is for numeric fields  
+                    "TotalCost": record.get('TotalCost'),  # Keep None as is for numeric fields
                     
                     # Metadata fields
                     "ProcessedAt": timestamp
                 }
                 
                 # Handle None values for numeric fields properly
-                for field in ['quantity', 'unit_rate', 'total_cost', 'SourceRow']:
-                    if entity[field] is None and field != 'SourceRow':
-                        entity[field] = None  # Azure Tables can handle None for these
-                    elif field == 'SourceRow' and entity[field] is None:
-                        entity[field] = 0  # Default SourceRow to 0 if None
+                # for field in ['quantity', 'unit_rate', 'total_cost', 'SourceRow']:
+                #     if entity[field] is None and field != 'SourceRow':
+                #         entity[field] = None  # Azure Tables can handle None for these
+                #     elif field == 'SourceRow' and entity[field] is None:
+                #         entity[field] = 0  # Default SourceRow to 0 if None
                 
-                # Truncate long string fields if necessary
-                string_fields = ['remarks', 'item_number', 'description', 'unit', 'SheetName']
-                for field in string_fields:
-                    if entity[field] and len(str(entity[field])) > 32000:
-                        entity[field] = str(entity[field])[:32000] + "...[truncated]"
+                # # Truncate long string fields if necessary
+                # string_fields = ['remarks', 'item_number', 'description', 'unit', 'SheetName']
+                # for field in string_fields:
+                #     if entity[field] and len(str(entity[field])) > 32000:
+                #         entity[field] = str(entity[field])[:32000] + "...[truncated]"
                 
                 entities.append(entity)
             
+            logging.info(f"Filtered {len(records)} records: {len(entities)} valid, {skipped_no_total_cost} skipped (invalid TotalCost), {skipped_missing_fields} skipped (missing fields)")
             # Insert entities one by one with error handling
             successful_inserts = 0
             failed_inserts = 0
@@ -235,18 +316,5 @@ class AzureTableService:
             logging.error(f"Error processing BOQ records: {str(e)}")
             return False
     
-    def _sanitize_key(self, key: str) -> str:
-        """Sanitize string to be used as PartitionKey or RowKey"""
-        # Remove invalid characters for Azure Table keys
-        invalid_chars = ['/', '\\', '#', '?', '\t', '\n', '\r']
-        sanitized = key
-        for char in invalid_chars:
-            sanitized = sanitized.replace(char, '_')
-        
-        # Ensure it's not empty and not too long (max 1KB)
-        if not sanitized:
-            sanitized = "default"
-        if len(sanitized) > 1000:
-            sanitized = sanitized[:1000]
-            
-        return sanitized
+
+

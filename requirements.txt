@@ -9,3 +9,5 @@ openpyxl>=3.0.0
 pandas
 pydantic
 openai
+pyodbc
+pymssql

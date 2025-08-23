@@ -1,7 +1,8 @@
 import azure.functions as func
 
 # from filehandler import process_excel_file
-from processors.excel_to_table_processor import process_excel_file
+
+from filehandler import process_excel_file
 from utils.file_utils import is_excel_file
 import logging
 import os
@@ -19,7 +20,7 @@ def blob_trigger(myblob: func.InputStream):
     
     try:
         result = process_excel_file(myblob)
-        logging.warning(f"Result: {result}")
+        logging.warning(f"Result: True")
         
         if result.success:
             logging.info(f"✅ {result.message}")

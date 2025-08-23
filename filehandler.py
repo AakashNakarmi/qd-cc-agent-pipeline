@@ -1,26 +1,43 @@
-# import logging
-# import azure.functions as func
-# from processors.excel_to_table_processor import excel_processor, process_excel_file2
+import logging
+import os
 
-# def process_excel_file(myblob: func.InputStream):
-#     """
-#     Process the Excel file. Add your Excel processing logic here.
-#     """
-#     try:
-#         # Read blob content
-#         result = process_excel_file2(myblob)
+from models.processing_models import ProcessingResult
+from processors.excel_to_table_processor import EnhancedExcelToTableProcessor
+
+
+def process_excel_file(myblob):
+    """
+    Enhanced process function for multiple sheets with OpenAI mapping
+    """
+    try:
+        # Read blob content
+        file_content = myblob.read()
         
-#         # Process Excel and store in Azure Table
-#         # result = excel_processor.process_excel_to_table(
-#         #     file_content=file_content,
-#         #     filename=myblob.name,
-#         #     max_records=5  # Top 5 records
-#         # )
+        # Initialize services
+        logging.warning(f"Using Azure Table Service with connection string: {os.environ['saqddev01_STORAGE']}")
         
-#         logging.info(f"Successfully processed Excel file: {myblob.name}")
+        project_excel_processor = EnhancedExcelToTableProcessor()
         
+        project_result, excel_result = project_excel_processor.process_and_store_project_info(
+            file_content=file_content,
+            filename=myblob.name
+        )
         
-#     except Exception as e:
-#         logging.error(f"Error processing Excel file {myblob.name}: {str(e)}")
+        # Log results
+        if project_result and excel_result.success:
+            logging.info(f"Processing successful: {excel_result.message}")
+            # if excel_result.sheet_results:
+            #     for sheet_result in excel_result.sheet_results:
+            #         logging.info(f"Sheet '{sheet_result['sheet_name']}': {sheet_result['message']}")
+        else:
+            logging.error(f"Processing failed: {excel_result.message}")
         
-#     return result
+        return excel_result
+        
+    except Exception as e:
+        logging.error(f"Error in process_excel_file: {str(e)}")
+        return ProcessingResult(
+            success=False,
+            message=f"Error processing blob: {str(e)}",
+            records_processed=0
+        )

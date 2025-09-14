@@ -23,6 +23,46 @@ class EnhancedExcelToTableProcessor:
         self.openai_service = AzureOpenAIService()
         self.boq_schema = BOQSchema()
     
+    def process_and_store_project_info(self, file_content: bytes, filename: str) -> Optional[Dict[str, Any]]:
+        """
+        Complete workflow: Extract project info from first sheet and store in Azure Table
+        
+        Args:
+            file_content: Excel file content as bytes
+            filename: Name of the Excel file
+        
+        Returns:
+            Dict containing stored project information with project_id, or None if failed
+        """
+        try:
+            project_id = str(uuid.uuid4())
+            # Extract project information from first sheet
+            project_info = self.process_first_sheet_for_project_info(file_content, filename)
+            project_info['project_id'] = project_id
+            
+            if not project_info:
+                logging.error("Could not extract project information from first sheet")
+                return None
+            
+            # Store the project information
+            project_result = self.store_project_with_retry(project_info, filename)
+            
+            excel_result = self.process_excel_to_table(
+                file_content = file_content,
+                filename = filename,
+                project_id = project_id
+            )
+            
+            if project_result and excel_result.success:
+                return project_result, excel_result
+            else:
+                logging.error("Failed to store project information")
+                return None, None
+                
+        except Exception as e:
+            logging.error(f"Error in process_and_store_project_info: {str(e)}")
+            return None, None
+        
     #######################################################    
     ##### EXTRACTION OF PROJECT INFO FROM FIRST SHEET #####
     ##### RELATED FUNCTIONS ###############################
@@ -235,52 +275,6 @@ class EnhancedExcelToTableProcessor:
         logging.error(f"Failed to store project after {max_retries} retries")
         return None
 
-    def process_and_store_project_info(self, file_content: bytes, filename: str) -> Optional[Dict[str, Any]]:
-        """
-        Complete workflow: Extract project info from first sheet and store in Azure Table
-        
-        Args:
-            file_content: Excel file content as bytes
-            filename: Name of the Excel file
-        
-        Returns:
-            Dict containing stored project information with project_id, or None if failed
-        """
-        try:
-            project_id = str(uuid.uuid4())
-            # Extract project information from first sheet
-            project_info = self.process_first_sheet_for_project_info(file_content, filename)
-            project_info['project_id'] = project_id
-            
-            if not project_info:
-                logging.error("Could not extract project information from first sheet")
-                return None
-            
-            # Store the project information
-            project_result = self.store_project_with_retry(project_info, filename)
-            
-            excel_result = self.process_excel_to_table(
-                file_content = file_content,
-                filename = filename,
-                project_id = project_id
-            )
-            
-            if project_result and excel_result.success:
-                # Return the complete project information including the assigned ID
-                # stored_project_info = project_info.copy()
-                # stored_project_info['project_id'] = project_id
-                # stored_project_info['source_filename'] = filename
-                
-                # logging.info(f"Successfully processed and stored project: {stored_project_info['project_name']}")
-                # return stored_project_info
-                return project_result, excel_result
-            else:
-                logging.error("Failed to store project information")
-                return None, None
-                
-        except Exception as e:
-            logging.error(f"Error in process_and_store_project_info: {str(e)}")
-            return None, None
     
     ############################################################
     ##### EXTRACTION OF SECTION AND BOQ INFO FROM ALL SHEETS ###
@@ -305,7 +299,7 @@ class EnhancedExcelToTableProcessor:
             total_records_processed = 0
             # project_id = filename.replace('.xlsx', '').replace('.xls', '')
             
-            for sheet_index, sheet_name in enumerate(sheet_names[:3]):
+            for sheet_index, sheet_name in enumerate(sheet_names[:7]):
                 try:
                     # Process each sheet
                     sheet_result = self._process_single_sheet(
@@ -320,14 +314,15 @@ class EnhancedExcelToTableProcessor:
                     })
                     
                     if sheet_result['success']:
+                        # Add section information if available
+                        if sheet_result.get('section'):
+                            all_sections.append(sheet_result['section'])
+                            
                         # Add BOQ records if available
                         if sheet_result.get('records'):
                             all_processed_records.extend(sheet_result['records'])
                             total_records_processed += sheet_result['records_processed']
                         
-                        # Add section information if available
-                        if sheet_result.get('section'):
-                            all_sections.append(sheet_result['section'])
                     
                 except Exception as e:
                     logging.error(f"Error processing sheet {sheet_name}: {str(e)}")
@@ -387,66 +382,6 @@ class EnhancedExcelToTableProcessor:
                 message=f"Error processing Excel file: {str(e)}",
                 records_processed=0
             )
-    
-    # def _store_sections_with_retry(self, sections: List[Section], filename: str, max_retries: int = 3) -> bool:
-    #     """Store section information with retry logic"""
-    #     try:
-    #         # Convert Section dataclass objects to dictionaries for storage
-    #         section_records = []
-    #         for section in sections:
-    #             section_dict = {
-    #                 'PartitionKey': f"{section.project_id}",
-    #                 'RowKey': f"{section.section_id}",
-    #                 'section_id': section.section_id,
-    #                 'section_name': section.section_name,
-    #                 'project_id': section.project_id,
-    #                 'cost': section.cost,
-    #                 'discipline': section.discipline,
-    #                 'source_file': filename
-    #             }
-    #             section_records.append(section_dict)
-            
-    #         # Try to store all sections at once (assuming you have a method for this)
-    #         # You might need to create a new method in AzureTableService for sections
-    #         success = self.table_service.insert_section_records(section_records)
-            
-    #         if success:
-    #             logging.info(f"Successfully stored all {len(sections)} sections in batch")
-    #             return True
-            
-    #         # If batch insert fails, try individual section insertion with retry
-    #         logging.warning("Batch section insert failed, trying individual section insertion")
-    #         successful_inserts = 0
-            
-    #         for i, section_record in enumerate(section_records):
-    #             retry_count = 0
-    #             record_inserted = False
-                
-    #             while retry_count < max_retries and not record_inserted:
-    #                 try:
-    #                     single_success = self.table_service.insert_section_records([section_record])
-    #                     if single_success:
-    #                         successful_inserts += 1
-    #                         record_inserted = True
-    #                         logging.debug(f"Successfully inserted section {i+1}/{len(section_records)}")
-    #                     else:
-    #                         retry_count += 1
-    #                         logging.warning(f"Failed to insert section {i+1}, retry {retry_count}/{max_retries}")
-                    
-    #                 except Exception as e:
-    #                     retry_count += 1
-    #                     logging.error(f"Error inserting section {i+1}, retry {retry_count}/{max_retries}: {str(e)}")
-                
-    #             if not record_inserted:
-    #                 logging.error(f"Failed to insert section {i+1} after {max_retries} retries: {section_record}")
-            
-    #         logging.info(f"Individual section insertion completed: {successful_inserts}/{len(section_records)} sections inserted")
-    #         return successful_inserts > 0
-            
-    #     except Exception as e:
-    #         logging.error(f"Error in _store_sections_with_retry: {str(e)}")
-    #         return False
-    
     
     def _store_sections_with_retry(self, sections: List[Section], filename: str, max_retries: int = 3) -> bool:
         """Store section information with retry logic"""
@@ -608,18 +543,6 @@ class EnhancedExcelToTableProcessor:
                     # Check if required fields are present
                     required_mapped = self._validate_required_fields(column_mapping)
                     if required_mapped:
-                        # Re-read the sheet with the correct header row
-                        # df = pd.read_excel(excel_file, sheet_name=sheet_name, header=header_row)
-                        
-                        # # Clean column names
-                        # df.columns = df.columns.astype(str).str.strip()
-                        
-                        # # Process BOQ records with the mapping
-                        # processed_records = self._map_and_clean_records(df, column_mapping, sheet_name, filename)
-                        
-                        # result_data['records'] = processed_records
-                        # result_data['records_processed'] = len(processed_records)
-                        # result_data['message'] += f" (BOQ: {len(processed_records)} records"
                         
                         column_indices = self._get_column_indices(df_raw, header_row, column_mapping)
                     
@@ -674,143 +597,7 @@ class EnhancedExcelToTableProcessor:
                 'message': f"Error processing sheet '{sheet_name}': {str(e)}",
                 'records_processed': 0
             }
-    
-#     def _analyze_sheet_with_openai(self, sheet_preview: str, sheet_name: str, 
-#           sheet_index, project_id: str) -> Optional[Dict[str, Any]]:
-#         """Use OpenAI to analyze sheet for both BOQ table structure and section information"""
-#         try:
-#             # Prepare the schema information
-#             required_fields_info = json.dumps(self.boq_schema.REQUIRED_FIELDS, indent=2)
-#             optional_fields_info = json.dumps(self.boq_schema.OPTIONAL_FIELDS, indent=2)
-            
-#             system_message = """You are an expert in construction BOQ (Bill of Quantities) data analysis and Excel data extraction.
-# Your task is to analyze Excel sheet content and identify:
-# 1. BOQ table structure (header row and column mapping)
-# 2. Section information (section name, costs, discipline)
-# 3. Extract metadata about the sheet/section
 
-# Return only a valid JSON object with the analysis results."""
-            
-#             user_message = f"""
-# I have an Excel sheet named "{sheet_name}" (sheet index: {sheet_index}) from project "{project_id}" with the following content:
-
-# {sheet_preview}
-
-# Please analyze this sheet content and provide BOTH:
-
-# 1. **BOQ TABLE ANALYSIS** (if a BOQ table exists):
-#    - Identify the row number where data table headers are located
-#    - Map headers to BOQ schema fields (quantity and unit_rate are mandatory)
-
-# 2. **SECTION INFORMATION EXTRACTION**:
-#    - Extract section name (often the sheet name or a title in the sheet)
-#    - Identify any total costs or budget amounts
-#    - Determine the discipline/trade (electrical, mechanical, civil, etc.)
-#    - Generate a section_id (use sheet_index or derive from content)
-
-# BOQ SCHEMA:
-# REQUIRED FIELDS: {required_fields_info}
-# OPTIONAL FIELDS: {optional_fields_info}
-
-# SECTION SCHEMA:
-# - section_id: int (required) - use sheet index or generate from content
-# - section_name: str (required) - extract from sheet name or content
-# - project_id: str (required) - use "{project_id}"
-# - cost: float (optional) - any total/budget amount found
-# - discipline: str (optional) - construction discipline/trade
-
-# Return ONLY a JSON object in this format:
-# {{
-#   "boq_table_found":"true|false",
-#   "table_analysis": {{
-#     "header_row": <row_number_or_null>,
-#     "column_mapping": {{}},
-#     "confidence": "high|medium|low|none"
-#   }},
-#   "section_info": {{
-#     "section_id": {sheet_index},
-#     "section_name": "<extracted_section_name>",
-#     "project_id": "{project_id}",
-#     "cost": <total_cost_or_null>,
-#     "discipline": "<discipline_or_null>"
-#   }}
-# }}
-
-# IMPORTANT:
-# - If no BOQ table is found, set boq_table_found as false. table_analysis values and section_info values to null/empty
-# - Use sheet name as fallback for section_name
-# - Look for keywords like "total", "sum", "budget" for cost extraction
-# - Look for discipline keywords like "electrical", "mechanical", "civil", "plumbing", etc.
-# """
-            
-#             response = self.openai_service.simple_chat(
-#                 user_message=user_message,
-#                 system_message=system_message,
-#                 temperature=0.1
-#             )
-            
-#             # Parse the JSON response
-#             try:
-#                 response_clean = response.strip()
-#                 if response_clean.startswith('```json'):
-#                     response_clean = response_clean[7:-3]
-#                 elif response_clean.startswith('```'):
-#                     response_clean = response_clean[3:-3]
-                
-#                 analysis_result = json.loads(response_clean)
-                
-#                 logging.info(f"OpenAI analysis for '{sheet_name}': {analysis_result}")
-                
-#                 # Validate and clean the response
-#                 # if 'section_info' not in analysis_result:
-#                 #     # Create default section info if missing
-#                 #     analysis_result['section_info'] = {
-#                 #         'section_id': sheet_index,
-#                 #         'section_name': sheet_name,
-#                 #         'project_id': project_id,
-#                 #         'cost': None,
-#                 #         'discipline': None
-#                 #     }
-                
-#                 # Ensure section_info has required fields
-#                 # section_info = analysis_result['section_info']
-#                 # if 'section_id' not in section_info:
-#                 #     section_info['section_id'] = sheet_index
-#                 # if 'section_name' not in section_info or not section_info['section_name']:
-#                 #     section_info['section_name'] = sheet_name
-#                 # if 'project_id' not in section_info:
-#                 #     section_info['project_id'] = project_id
-                
-#                 return analysis_result
-                
-#             except json.JSONDecodeError as je:
-#                 logging.error(f"Failed to parse OpenAI response as JSON: {response}")
-#                 logging.error(f"JSON Error: {str(je)}")
-#                 # Return default structure with section info
-#                 return {
-#                     'table_analysis': None,
-#                     'section_info': {
-#                         'section_id': sheet_index,
-#                         'section_name': sheet_name,
-#                         'project_id': project_id,
-#                         'cost': None,
-#                         'discipline': None
-#                     }
-#                 }
-                
-#         except Exception as e:
-#             logging.error(f"Error analyzing sheet with OpenAI: {str(e)}")
-#             return {
-#                 'table_analysis': None,
-#                 'section_info': {
-#                     'section_id': sheet_index,
-#                     'section_name': sheet_name,
-#                     'project_id': project_id,
-#                     'cost': None,
-#                     'discipline': None
-#                 }
-#             }
-    
     def _get_column_indices(self, df_raw: pd.DataFrame, header_row: int, 
                        column_mapping: Dict[str, str]) -> Dict[str, int]:
         """Get column indices for all mapped columns"""
@@ -896,8 +683,6 @@ class EnhancedExcelToTableProcessor:
                         continue
                     
                     # Get required values using indices
-                    quantity_value = row_data[quantity_idx] if quantity_idx < len(row_data) else None
-                    unit_rate_value = row_data[unit_rate_idx] if unit_rate_idx < len(row_data) else None
                     description_value = row_data[boq_description_idx] if boq_description_idx < len(row_data) else None
                     
                     # Skip if required values are missing or invalid
@@ -906,18 +691,6 @@ class EnhancedExcelToTableProcessor:
                     if pd.isna(description_value):
                         continue
                     
-                    # Try to convert to numeric values
-                    # try:
-                    #     quantity = float(str(quantity_value).replace(',', ''))
-                    #     unit_rate = float(str(unit_rate_value).replace(',', ''))
-                    # except (ValueError, TypeError):
-                    #     logging.warning(f"Invalid numeric values in row {row_idx + 1}: quantity={quantity_value}, unit_rate={unit_rate_value}")
-                    #     continue
-                    
-                    # Skip zero or negative values
-                    # if quantity <= 0 or unit_rate <= 0:
-                    #     continue
-                    
                     # Create BOQ record
                     boq_record = {
                         'ItemID': str(uuid.uuid4()),
@@ -925,14 +698,11 @@ class EnhancedExcelToTableProcessor:
                         'SectionID': section_id,  # Use sheet name as section ID
                         'SheetName': sheet_name,
                         'SourceRow': row_idx + 1,
-                        'Quantity': quantity_value,
-                        'UnitRate': unit_rate_value,
-                        # 'TotalCost': quantity_value  # Calculate total
                     }
                     
                     # Add ALL other mapped fields using indices
                     for schema_field, col_idx in column_indices.items():
-                        if schema_field not in ['Quantity', 'UnitRate'] and col_idx < len(row_data):
+                        if col_idx < len(row_data):
                             value = row_data[col_idx]
                             
                             if not pd.isna(value) and str(value).strip():
@@ -958,7 +728,6 @@ class EnhancedExcelToTableProcessor:
             logging.error(f"Error extracting BOQ records from sheet '{sheet_name}': {str(e)}")
             return []
 
-    
     def _analyze_sheet_with_openai(self, sheet_preview: str, sheet_name: str, 
                               sheet_index: int, project_id: str, sheet_id: str ) -> Optional[Dict[str, Any]]:
             """Use OpenAI to analyze sheet for both BOQ table structure and section information"""
@@ -1102,7 +871,6 @@ class EnhancedExcelToTableProcessor:
                     }
                 }
     
-    
     def _validate_required_fields(self, column_mapping: Dict[str, str]) -> bool:
         """Validate that required fields are present in the mapping"""
         mapped_fields = set(column_mapping.values())
@@ -1151,183 +919,3 @@ class EnhancedExcelToTableProcessor:
         
         logging.info(f"Mapped {len(mapped_records)} valid records from sheet '{sheet_name}'")
         return mapped_records
-
-
-
-    # def link_boq_to_project(self, boq_records: List[Dict[str, Any]], project_id: str) -> List[Dict[str, Any]]:
-    #     """
-    #     Link BOQ records to a project by adding project_id to each record
-        
-    #     Args:
-    #         boq_records: List of BOQ record dictionaries
-    #         project_id: The project ID to link to
-        
-    #     Returns:
-    #         Updated BOQ records with project_id added
-    #     """
-    #     try:
-    #         updated_records = []
-    #         for record in boq_records:
-    #             updated_record = record.copy()
-    #             updated_record['LinkedProjectID'] = project_id
-    #             updated_records.append(updated_record)
-            
-    #         logging.info(f"Linked {len(updated_records)} BOQ records to project {project_id}")
-    #         return updated_records
-            
-    #     except Exception as e:
-    #         logging.error(f"Error linking BOQ records to project: {str(e)}")
-    #         return boq_records  # Return original records if linking fails
-
-    # Updated main processing function example
-    # def process_excel_with_complete_workflow(self, file_content: bytes, filename: str, max_records: int = 30) -> ProcessingResult:
-    #     """
-    #     Complete workflow: Process project info and BOQ data, linking them together
-        
-    #     Args:
-    #         file_content: Excel file content as bytes
-    #         filename: Name of the Excel file
-    #         max_records: Maximum BOQ records to process per sheet
-        
-    #     Returns:
-    #         ProcessingResult with both project and BOQ information
-    #     """
-    #     try:
-    #         # Step 1: Extract and store project information
-    #         stored_project = self.process_and_store_project_info(file_content, filename)
-            
-    #         if not stored_project:
-    #             logging.warning("Could not extract/store project info, continuing with BOQ processing only")
-    #             project_id = None
-    #         else:
-    #             project_id = stored_project['project_id']
-    #             logging.info(f"Project stored successfully with ID: {project_id}")
-            
-    #         # Step 2: Process BOQ data
-    #         boq_result = self.process_excel_to_table(file_content, filename, max_records)
-            
-    #         # Step 3: Link BOQ records to project if both are successful
-    #         if project_id and boq_result.success and boq_result.data and boq_result.data.get('records'):
-    #             linked_records = self.link_boq_to_project(boq_result.data['records'], project_id)
-                
-    #             # Update the stored BOQ records with project linkage
-    #             # You might want to update the records in the table here
-    #             boq_result.data['records'] = linked_records
-            
-    #         # Enhance the result with project information
-    #         if stored_project:
-    #             if not boq_result.data:
-    #                 boq_result.data = {}
-    #             boq_result.data['project_info'] = stored_project
-            
-    #         # Update success message
-    #         if boq_result.success and stored_project:
-    #             boq_result.message = f"Successfully processed project '{stored_project['project_name']}' and {boq_result.records_processed} BOQ records"
-    #         elif stored_project:
-    #             boq_result.message = f"Successfully processed project '{stored_project['project_name']}' but BOQ processing failed"
-            
-    #         return boq_result
-            
-    #     except Exception as e:
-    #         logging.error(f"Error in complete workflow: {str(e)}")
-    #         return ProcessingResult(
-    #             success=False,
-    #             message=f"Error in complete workflow: {str(e)}",
-    #             records_processed=0
-    #         )
-    
-    
-        # def get_project_by_id(self, project_id: str) -> Optional[Dict[str, Any]]:
-    #     """
-    #     Retrieve a project record by ID
-        
-    #     Args:
-    #         project_id: The project ID to retrieve
-        
-    #     Returns:
-    #         Dict containing project data or None if not found
-    #     """
-    #     try:
-    #         # Query for the project across all partitions
-    #         filter_query = f"ProjectID eq '{project_id}'"
-    #         entities = list(self.table_client.query_entities(query_filter=filter_query))
-            
-    #         if entities:
-    #             entity = entities[0]  # Should be only one with unique project ID
-    #             return {
-    #                 'project_id': entity.get('ProjectID'),
-    #                 'project_name': entity.get('ProjectName'),
-    #                 'project_description': entity.get('ProjectDescription'),
-    #                 'total_cost': entity.get('TotalCost'),
-    #                 'project_date': entity.get('ProjectDate'),
-    #                 'project_category': entity.get('ProjectCategory'),
-    #                 'source_filename': entity.get('SourceFilename'),
-    #                 'created_date': entity.get('CreatedDate'),
-    #                 'last_modified': entity.get('LastModified'),
-    #                 'extraction_confidence': entity.get('ExtractionConfidence'),
-    #                 'extraction_notes': entity.get('ExtractionNotes')
-    #             }
-    #         return None
-            
-    #     except Exception as e:
-    #         logging.error(f"Error retrieving project by ID {project_id}: {str(e)}")
-    #         return None
-
-    # def update_project_record(self, project_id: str, updated_data: Dict[str, Any]) -> bool:
-    #     """
-    #     Update an existing project record
-        
-    #     Args:
-    #         project_id: The project ID to update
-    #         updated_data: Dictionary containing updated project information
-        
-    #     Returns:
-    #         bool: True if successful, False otherwise
-    #     """
-    #     try:
-    #         from datetime import datetime
-            
-    #         # First, get the existing entity to preserve PartitionKey and RowKey
-    #         existing_project = self.get_project_by_id(project_id)
-    #         if not existing_project:
-    #             logging.error(f"Project with ID {project_id} not found for update")
-    #             return False
-            
-    #         # Query to get the full entity with metadata
-    #         filter_query = f"ProjectID eq '{project_id}'"
-    #         entities = list(self.table_client.query_entities(query_filter=filter_query))
-            
-    #         if not entities:
-    #             return False
-            
-    #         entity = entities[0]
-            
-    #         # Update the entity with new data
-    #         if 'project_name' in updated_data:
-    #             entity['ProjectName'] = updated_data['project_name']
-    #         if 'project_description' in updated_data:
-    #             entity['ProjectDescription'] = updated_data['project_description']
-    #         if 'total_cost' in updated_data:
-    #             entity['TotalCost'] = updated_data['total_cost']
-    #         if 'project_category' in updated_data:
-    #             entity['ProjectCategory'] = updated_data['project_category']
-    #         if 'project_date' in updated_data:
-    #             if isinstance(updated_data['project_date'], datetime):
-    #                 entity['ProjectDate'] = updated_data['project_date']
-    #             else:
-    #                 try:
-    #                     entity['ProjectDate'] = datetime.strptime(str(updated_data['project_date']), '%Y-%m-%d')
-    #                 except (ValueError, TypeError):
-    #                     logging.warning(f"Could not parse updated project date: {updated_data.get('project_date')}")
-            
-    #         # Update metadata
-    #         entity['LastModified'] = datetime.utcnow()
-            
-    #         # Update in table
-    #         self.table_client.update_entity(entity=entity, mode='replace')
-    #         logging.info(f"Successfully updated project record with ID: {project_id}")
-    #         return True
-            
-    #     except Exception as e:
-    #         logging.error(f"Error updating project record {project_id}: {str(e)}")
-    #         return False

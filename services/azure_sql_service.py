@@ -15,18 +15,6 @@ class AzureSQLService:
         self.username = os.environ["AZURE_SQL_USERNAME"]
         self.password = os.environ["AZURE_SQL_PASSWORD"]
         
-        # Connection string for Azure SQL Database
-        # self.connection_string = (
-        #     f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-        #     f"SERVER={self.server};"
-        #     f"DATABASE={self.database};"
-        #     f"UID={self.username};"
-        #     f"PWD={self.password};"
-        #     f"Encrypt=yes;"
-        #     f"TrustServerCertificate=no;"
-        #     f"Connection Timeout=30;"
-        # )
-        
         # Initialize database tables
         self._create_tables_if_not_exist()
     
@@ -370,91 +358,4 @@ class AzureSQLService:
                 if 'conn' in locals():
                     conn.close()
     
-    
-    # def insert_boq_records(self, records: List[Dict[str, Any]], project_id: str) -> bool:
-    #     """
-    #     Insert BOQ records into SQL Database
-        
-    #     Args:
-    #         records: List of dictionaries containing BOQ information
-    #         project_id: Project ID for the records
-        
-    #     Returns:
-    #         bool: True if successful, False otherwise
-    #     """
-    #     try:
-    #         conn = self._get_connection()
-    #         cursor = conn.cursor()
-            
-    #         successful_inserts = 0
-    #         skipped_no_total_cost = 0
-    #         skipped_missing_fields = 0
-            
-    #         insert_query = """
-    #         MERGE boqitems AS target
-    #         USING (SELECT %s AS ItemID) AS source
-    #         ON target.ItemID = source.ItemID
-    #         WHEN NOT MATCHED THEN
-    #             INSERT (ItemID, ProjectID, SectionID, SheetName, SourceRow,
-    #                    ItemNumber, Description, Quantity, Unit, UnitRate, 
-    #                    TotalCost, ProcessedAt)
-    #             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-    #         """
-            
-    #         for record in records:
-    #             # Validate required fields
-    #             if not record.get('ItemID') or not record.get('ProjectID'):
-    #                 logging.warning(f"Skipping record with missing ItemID or ProjectID: {record}")
-    #                 skipped_missing_fields += 1
-    #                 continue
-                
-    #             # Validate total_cost
-    #             total_cost = record.get('TotalCost')
-    #             if not is_valid_total_cost(total_cost):
-    #                 logging.debug(f"Skipping record with invalid TotalCost: ItemID={record.get('ItemID')}, TotalCost={total_cost}")
-    #                 skipped_no_total_cost += 1
-    #                 continue
-                
-    #             # Convert total_cost to float if it's a valid string
-    #             if isinstance(total_cost, str):
-    #                 total_cost = float(total_cost.strip())
-                
-    #             try:
-    #                 cursor.execute(insert_query, (
-    #                     record['ItemID'],  # for MERGE condition
-    #                     record['ItemID'],
-    #                     record['ProjectID'],
-    #                     record.get('SectionID'),
-    #                     record.get('SheetName', ''),
-    #                     record.get('SourceRow', 0),
-    #                     record.get('ItemNumber', ''),
-    #                     record.get('Description', ''),
-    #                     record.get('Quantity'),
-    #                     record.get('Unit', ''),
-    #                     record.get('UnitRate'),
-    #                     total_cost,
-    #                     datetime.utcnow()
-    #                 ))
-                    
-    #                 successful_inserts += 1
-    #                 logging.debug(f"Successfully queued BOQ record: ItemID={record['ItemID']}")
-                    
-    #             except Exception as e:
-    #                 logging.error(f"Error preparing BOQ record {record['ItemID']}: {str(e)}")
-    #                 continue
-            
-    #         conn.commit()
-    #         logging.info(f"BOQ Records processing complete: {successful_inserts} successful, "
-    #                     f"{skipped_no_total_cost} skipped (invalid TotalCost), "
-    #                     f"{skipped_missing_fields} skipped (missing fields)")
-            
-    #         return successful_inserts > 0
-                
-    #     except Exception as e:
-    #         logging.error(f"Error processing BOQ records: {str(e)}")
-    #         return False
-    #     finally:
-    #         if 'conn' in locals():
-    #             conn.close()
-                
                 

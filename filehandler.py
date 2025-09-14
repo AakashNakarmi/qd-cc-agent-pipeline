@@ -13,9 +13,6 @@ def process_excel_file(myblob):
         # Read blob content
         file_content = myblob.read()
         
-        # Initialize services
-        logging.warning(f"Using Azure Table Service with connection string: {os.environ['saqddev01_STORAGE']}")
-        
         project_excel_processor = EnhancedExcelToTableProcessor()
         
         project_result, excel_result = project_excel_processor.process_and_store_project_info(
@@ -26,9 +23,7 @@ def process_excel_file(myblob):
         # Log results
         if project_result and excel_result.success:
             logging.info(f"Processing successful: {excel_result.message}")
-            # if excel_result.sheet_results:
-            #     for sheet_result in excel_result.sheet_results:
-            #         logging.info(f"Sheet '{sheet_result['sheet_name']}': {sheet_result['message']}")
+
         else:
             logging.error(f"Processing failed: {excel_result.message}")
         

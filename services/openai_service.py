@@ -2,6 +2,7 @@ import os
 from openai import AzureOpenAI
 from typing import List, Dict, Any, Optional, Generator
 import logging
+from env_constant import AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT
 from models.processing_models import ChatMessage
     
 class AzureOpenAIService:
@@ -17,8 +18,8 @@ class AzureOpenAIService:
             api_version: API version to use
             default_model: Default model deployment name
         """
-        endpoint=os.environ["AZURE_OPENAI_ENDPOINT"]
-        api_key=os.environ["AZURE_OPENAI_API_KEY"]
+        endpoint=AZURE_OPENAI_ENDPOINT
+        api_key=AZURE_OPENAI_API_KEY
         api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
         self.default_model = os.getenv("AZURE_OPENAI_DEFAULT_MODEL", "gpt-4o")
         

@@ -1,8 +1,26 @@
-.git*
-.vscode
-__azurite_db*__.json
-__blobstorage__
-__queuestorage__
+# Ignore Python cache folders
+__pycache__/
+*.pyc
+
+# Ignore virtual environment folders
+.venv/
+env/
+venv/
+
+# Ignore git folders and files
+.git/
+.gitignore
+
+# Ignore local configuration files
 local.settings.json
-test
-.venv
+
+# Ignore VS Code settings
+.vscode/
+
+# Ignore build and dist folders
+build/
+dist/
+
+# Ignore any logs
+*.log
+logs/

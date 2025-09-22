@@ -1,6 +1,4 @@
 # processors/excel_to_table_processor.py
-import json
-import os
 import time
 import uuid
 import pandas as pd
@@ -8,44 +6,54 @@ import logging
 import uuid
 from io import BytesIO
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from models.open_ai_services import OpenAIService
 from services.azure_sql_service import AzureSQLService
-from services.azure_table_service import AzureTableService
 from models.processing_models import BOQSchema, ProcessingResult, Section
-from services.openai_service import AzureOpenAIService
 from utils.boq_utils import merge_boq_descriptions_advanced
+
+
 
 
 class EnhancedExcelToTableProcessor:
     def __init__(self):
+        self.service_openai = OpenAIService()
         self.table_service = AzureSQLService()
-        # self.table_service = AzureTableService()
-        self.openai_service = AzureOpenAIService()
         self.boq_schema = BOQSchema()
-    
-    def process_and_store_project_info(self, file_content: bytes, filename: str) -> Optional[Dict[str, Any]]:
+
+
+
+    def process_and_store_project_info(self, file_content: bytes, filename: str, blob_details: Dict[str, str]) -> Optional[Dict[str, Any]]:
         """
         Complete workflow: Extract project info from first sheet and store in Azure Table
         
         Args:
             file_content: Excel file content as bytes
             filename: Name of the Excel file
-        
+            blob_details: Details extracted from the blob path
+
         Returns:
             Dict containing stored project information with project_id, or None if failed
         """
         try:
-            project_id = str(uuid.uuid4())
+            project_info={}
             # Extract project information from first sheet
-            project_info = self.process_first_sheet_for_project_info(file_content, filename)
+            # project_info = self.process_first_sheet_for_project_info(file_content, filename) #skip
+            project_info['project_oriented_country'] = blob_details.get('project_oriented_country')
+            project_info['project_start_year'] = blob_details.get('project_start_year') 
+            project_info['project_folder_name'] = blob_details.get('project_folder_name')
+            project_info['file_path'] =  blob_details.get('file_path')
+            project_id = f"{project_info['project_oriented_country']}_{project_info['project_start_year']}_{project_info['project_folder_name']}"
             project_info['project_id'] = project_id
-            
             if not project_info:
                 logging.error("Could not extract project information from first sheet")
                 return None
             
             # Store the project information
-            project_result = self.store_project_with_retry(project_info, filename)
+            
+            if not self.table_service._is_project_id_present(project_id):
+                project_result = self.store_project_with_retry(project_info, filename)
+            else:
+               logging.info(f"Skipping project insert: Project with ID '{project_id}' already exists in the database.")
             
             excel_result = self.process_excel_to_table(
                 file_content = file_content,
@@ -53,15 +61,15 @@ class EnhancedExcelToTableProcessor:
                 project_id = project_id
             )
             
-            if project_result and excel_result.success:
-                return project_result, excel_result
+            if excel_result.success:
+                return excel_result
             else:
                 logging.error("Failed to store project information")
-                return None, None
+                return None
                 
         except Exception as e:
             logging.error(f"Error in process_and_store_project_info: {str(e)}")
-            return None, None
+            return None
         
     #######################################################    
     ##### EXTRACTION OF PROJECT INFO FROM FIRST SHEET #####
@@ -97,7 +105,13 @@ class EnhancedExcelToTableProcessor:
             logging.info(f"First sheet '{first_sheet_name}' preview for project info extraction:\n{sheet_preview}")
             
             # Use OpenAI to extract project information
-            project_info = self._extract_project_info_with_openai(sheet_preview, first_sheet_name, filename)
+            print("\n--- Parameters passed---")
+            print(f"sheet_preview (first 200 chars):\n{sheet_preview[:200]}") 
+            print(f"sheet_name: {first_sheet_name}")
+            print(f"filename: {filename}")
+            print("------------------------------------------------------------\n")
+            project_info = self.service_openai._extract_project_info_with_openai(sheet_preview, first_sheet_name, filename)
+            print(project_info)
             
             if project_info:
                 logging.info(f"Successfully extracted project information: {project_info}")
@@ -108,131 +122,6 @@ class EnhancedExcelToTableProcessor:
                 
         except Exception as e:
             logging.error(f"Error processing first sheet for project info: {str(e)}")
-            return None
-
-    def _extract_project_info_with_openai(self, sheet_preview: str, sheet_name: str, filename: str) -> Optional[Dict[str, Any]]:
-        """
-        Use OpenAI to extract project information from the sheet content
-        
-        Args:
-            sheet_preview: String representation of sheet content
-            sheet_name: Name of the sheet being processed
-            filename: Original filename
-        
-        Returns:
-            Dict containing extracted project information or None if extraction fails
-        """
-        try:
-            system_message = """You are an expert in construction project document analysis and BOQ (Bill of Quantities) data extraction.
-    Your task is to analyze Excel sheet content and extract project information including project name and description.
-
-    Look for:
-    1. Project names (often at the top of documents, may include words like "Project", "Construction", "Building", etc.)
-    2. Project descriptions (detailed text describing what the project is about)
-    3. Any other relevant project details like category, dates, or cost information
-
-    Return only a valid JSON object with the extracted information."""
-
-            user_message = f"""
-    I have an Excel sheet named "{sheet_name}" from file "{filename}" with the following content (showing first 15 rows):
-
-    {sheet_preview}
-
-    Please analyze this content and extract project information. Focus on finding:
-
-    1. PROJECT NAME (REQUIRED) - Look for:
-    - Text that appears to be a project title or name
-    - May contain words like "Project", "Construction", "Building", "Development"
-    - Often appears in the first few rows
-    - Could be in headers, titles, or standalone cells
-
-    2. PROJECT DESCRIPTION (REQUIRED) - Look for:
-    - Detailed text describing the project scope, location, or purpose
-    - May be in a dedicated description field or scattered across multiple cells
-    - Could include location details, project type, or scope information
-
-    3. OPTIONAL FIELDS (if clearly visible):
-    - Total cost or budget information
-    - Project dates
-    - Project category or type
-
-    EXTRACTION RULES:
-    1. MUST extract project_name and project_description - these are mandatory
-    2. If no clear project name is found, try to construct one from available information
-    3. If no clear description is found, combine relevant descriptive text
-    4. Use the filename as fallback for project name if nothing else is found
-    5. Be intelligent about combining related information from multiple cells
-    6. Ignore purely tabular BOQ data (quantities, rates, amounts) - focus on project metadata
-
-    Return ONLY a JSON object in this exact format:
-    {{
-    "project_name": "extracted or constructed project name",
-    "project_description": "extracted or constructed project description", 
-    "total_cost": null or numeric_value,
-    "project_date": null or "YYYY-MM-DD",
-    "project_category": null or "category_string"
-    }}
-
-    Example response:
-    {{
-    "project_name": "Residential Complex Phase 1 Construction",
-    "project_description": "Construction of 50-unit residential complex with amenities including parking, landscaping, and community facilities in Downtown Area",
-    "total_cost": 2500000.0,
-    "project_date": null,
-    "project_category": "Residential Construction"
-    }}
-
-    If no meaningful project information can be found, use the filename and make reasonable assumptions:
-    {{
-    "project_name": "{filename.replace('.xlsx', '').replace('.xls', '')}",
-    "project_description": "Construction project as per BOQ specifications",
-    "total_cost": null,
-    "project_date": null, 
-    "project_category": "Construction"
-    }}
-    """
-
-            response = self.openai_service.simple_chat(
-                user_message=user_message,
-                system_message=system_message,
-                temperature=0.2  # Low temperature for consistent extraction
-            )
-            
-            # Parse the JSON response
-            try:
-                # Clean the response to extract JSON
-                response_clean = response.strip()
-                if response_clean.startswith('```json'):
-                    response_clean = response_clean[7:-3]
-                elif response_clean.startswith('```'):
-                    response_clean = response_clean[3:-3]
-                
-                project_info = json.loads(response_clean)
-                
-                logging.info(f"OpenAI project extraction for '{sheet_name}': {project_info}")
-                
-                # Validate the response structure - ensure required fields exist
-                if 'project_name' in project_info and 'project_description' in project_info:
-                    # Ensure project_name and project_description are not empty
-                    if not project_info['project_name'] or not project_info['project_description']:
-                        logging.warning("Empty project_name or project_description, using fallbacks")
-                        if not project_info['project_name']:
-                            project_info['project_name'] = filename.replace('.xlsx', '').replace('.xls', '')
-                        if not project_info['project_description']:
-                            project_info['project_description'] = "Construction project as per BOQ specifications"
-                    
-                    return project_info
-                else:
-                    logging.error(f"Invalid response structure from OpenAI - missing required fields: {project_info}")
-                    return None
-                    
-            except json.JSONDecodeError as je:
-                logging.error(f"Failed to parse OpenAI response as JSON: {response}")
-                logging.error(f"JSON Error: {str(je)}")
-                return None
-                
-        except Exception as e:
-            logging.error(f"Error extracting project info with OpenAI: {str(e)}")
             return None
 
     def store_project_with_retry(self, project_info: Dict[str, Any], filename: str, max_retries: int = 3) -> Optional[str]:
@@ -299,7 +188,7 @@ class EnhancedExcelToTableProcessor:
             total_records_processed = 0
             # project_id = filename.replace('.xlsx', '').replace('.xls', '')
             
-            for sheet_index, sheet_name in enumerate(sheet_names[:7]):
+            for sheet_index, sheet_name in enumerate(sheet_names):
                 try:
                     # Process each sheet
                     sheet_result = self._process_single_sheet(
@@ -514,7 +403,7 @@ class EnhancedExcelToTableProcessor:
             logging.info(f"Sheet '{sheet_name}' preview (first {preview_rows} rows):\n{sheet_preview}")
             
             # Use OpenAI to analyze the entire sheet content and find both table structure and section info
-            analysis_result = self._analyze_sheet_with_openai(sheet_preview, sheet_name, sheet_index, project_id, sheet_id)
+            analysis_result = self.service_openai._analyze_sheet_with_openai(sheet_preview, sheet_name, sheet_index, project_id, sheet_id)
             
             if not analysis_result or not analysis_result.get('boq_table_found'):
                 return {
@@ -728,149 +617,7 @@ class EnhancedExcelToTableProcessor:
             logging.error(f"Error extracting BOQ records from sheet '{sheet_name}': {str(e)}")
             return []
 
-    def _analyze_sheet_with_openai(self, sheet_preview: str, sheet_name: str, 
-                              sheet_index: int, project_id: str, sheet_id: str ) -> Optional[Dict[str, Any]]:
-            """Use OpenAI to analyze sheet for both BOQ table structure and section information"""
-            try:
-                # Prepare the schema information
-                required_fields_info = json.dumps(self.boq_schema.REQUIRED_FIELDS, indent=2)
-                optional_fields_info = json.dumps(self.boq_schema.OPTIONAL_FIELDS, indent=2)
-                
-                system_message = """You are an expert in construction BOQ (Bill of Quantities) data analysis and Excel data extraction.
-        Your task is to analyze Excel sheet content and identify:
-        1. BOQ table structure (header row and column mapping)
-        2. Section information (section name, costs, discipline)
-        3. Extract metadata about the sheet/section
 
-        Return only a valid JSON object with the analysis results."""
-                
-                user_message = f"""
-        I have an Excel sheet named "{sheet_name}" (sheet index: {sheet_index}) from project "{project_id}" with the following content:
-
-        {sheet_preview}
-
-        Please analyze this sheet content and provide BOTH:
-
-        1. **BOQ TABLE ANALYSIS** (if a BOQ table exists):
-        - Identify the exact row number (0-based index) where the table headers are located
-        - Map the column headers to BOQ schema fields
-        - Focus on finding Quantity and UnitRate columns (these are mandatory)
-
-        2. **SECTION INFORMATION EXTRACTION**:
-        - Extract section name (often the sheet name or a title in the sheet)
-        - Identify any total costs or budget amounts
-        - Determine the discipline/trade (electrical, mechanical, civil, etc.)
-        - Use sheet_index as section_id
-
-        BOQ SCHEMA:
-        REQUIRED FIELDS: {required_fields_info}
-        OPTIONAL FIELDS: {optional_fields_info}
-
-        SECTION SCHEMA:
-        - section_id: str (required) - use {sheet_id}
-        - section_name: str (required) - extract from sheet name or content
-        - project_id: str (required) - use "{project_id}"
-        - cost: float (optional) - any total/budget amount found
-        - discipline: str (optional) - construction discipline/trade
-
-        Return ONLY a JSON object in this exact format:
-        {{
-        "boq_table_found": true|false,
-        "table_analysis": {{
-            "header_row": <row_number_or_null>,
-            "column_mapping": {{
-            "<actual_column_name>": "<schema_field_name>",
-            ...
-            }},
-            "confidence": "high|medium|low"
-        }},
-        "section_info": {{
-            "section_id": {sheet_id},
-            "section_name": "<extracted_section_name>",
-            "project_id": "{project_id}",
-            "cost": <total_cost_or_null>,
-            "discipline": "<discipline_or_null>"
-        }}
-        }}
-
-        CRITICAL REQUIREMENTS:
-        - header_row must be the exact 0-based row index where column headers are located
-        - column_mapping keys must be the EXACT column names from the Excel sheet
-        - column_mapping values must be from the BOQ schema field names
-        - If no BOQ table is found, set boq_table_found to false and table_analysis to null
-        - Always provide section_info using sheet name as fallback for section_name
-        - Look for cost-related keywords: "total", "sum", "budget", "amount", "cost"
-        - Look for discipline keywords: "electrical", "mechanical", "civil", "plumbing", "hvac", etc.
-        """
-                
-                response = self.openai_service.simple_chat(
-                    user_message=user_message,
-                    system_message=system_message,
-                    temperature=0.1
-                )
-                
-                # Parse the JSON response
-                try:
-                    response_clean = response.strip()
-                    if response_clean.startswith('```json'):
-                        response_clean = response_clean[7:-3]
-                    elif response_clean.startswith('```'):
-                        response_clean = response_clean[3:-3]
-                    
-                    analysis_result = json.loads(response_clean)
-                    
-                    # Validate the response structure
-                    if 'boq_table_found' not in analysis_result:
-                        analysis_result['boq_table_found'] = False
-                    
-                    if 'section_info' not in analysis_result:
-                        analysis_result['section_info'] = {
-                            'section_id': sheet_id,
-                            'section_name': sheet_name,
-                            'project_id': project_id,
-                            'cost': None,
-                            'discipline': None
-                        }
-                    
-                    # Ensure section_info has required fields
-                    section_info = analysis_result['section_info']
-                    section_info.setdefault('section_id', sheet_id)
-                    section_info.setdefault('section_name', sheet_name)
-                    section_info.setdefault('project_id', project_id)
-                    
-                    logging.info(f"OpenAI analysis for '{sheet_name}': {analysis_result}")
-                    return analysis_result
-                    
-                except json.JSONDecodeError as je:
-                    logging.error(f"Failed to parse OpenAI response as JSON: {response}")
-                    logging.error(f"JSON Error: {str(je)}")
-                    # Return default structure with section info
-                    return {
-                        'boq_table_found': False,
-                        'table_analysis': None,
-                        'section_info': {
-                            'section_id': sheet_id,
-                            'section_name': sheet_name,
-                            'project_id': project_id,
-                            'cost': None,
-                            'discipline': None
-                        }
-                    }
-                    
-            except Exception as e:
-                logging.error(f"Error analyzing sheet with OpenAI: {str(e)}")
-                return {
-                    'boq_table_found': False,
-                    'table_analysis': None,
-                    'section_info': {
-                        'section_id': sheet_id,
-                        'section_name': sheet_name,
-                        'project_id': project_id,
-                        'cost': None,
-                        'discipline': None
-                    }
-                }
-    
     def _validate_required_fields(self, column_mapping: Dict[str, str]) -> bool:
         """Validate that required fields are present in the mapping"""
         mapped_fields = set(column_mapping.values())

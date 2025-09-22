@@ -54,7 +54,6 @@ class BOQSchema:
         'Unit': ['unit', 'uom', 'unit_of_measure', 'measure'],
         'TotalCost': ['total', 'total_cost', 'total_amount', 'amount', 'total_price'],
         'Discipline': ['discipline', 'trade', 'category', 'type', 'work_type'],
-        'CostType': ['cost_type', 'type', 'material_labor', 'category']
     }
     
 @dataclass

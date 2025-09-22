@@ -57,7 +57,7 @@ class AzureTableService:
             project_id = project_data.get('project_id')
             
             # Prepare the entity for Azure Table
-            # PartitionKey: Use a consistent partition strategy (e.g., by year or category)
+            # PartitionKey: Use a consistent partition strategy (e.g., by project_start_year or category)
             # RowKey: Use unique project ID
             partition_key = project_data.get('project_category', 'General')
             if not partition_key:
